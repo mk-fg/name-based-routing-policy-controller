@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 
-import itertools as it, operator as op, functools as ft
+import itertools as it, operator as op, functools as ft, subprocess as sp
 import pathlib as pl, contextlib as cl, collections as cs, ipaddress as ip
-import os, sys, re, logging, time, socket
+import os, sys, re, logging, time, socket, errno, signal
 
 
 class LogMessage:
 	def __init__(self, fmt, a, k): self.fmt, self.a, self.k = fmt, a, k
-	def __str__(self): return self.fmt.format(*self.a, **self.k) if self.a or self.k else self.fmt
+	def __str__(self):
+		try: return self.fmt.format(*self.a, **self.k) if self.a or self.k else self.fmt
+		except: raise ValueError(self.fmt, self.a, self.k)
 
 class LogStyleAdapter(logging.LoggerAdapter):
 	def __init__(self, logger, extra=None): super().__init__(logger, extra or dict())
@@ -22,18 +24,31 @@ err_fmt = lambda err: f'[{err.__class__.__name__}] {err}'
 get_logger = lambda name='': LogStyleAdapter(
 	logging.getLogger(name and 'nbrpc' or f'nbrpc.{name}') )
 
+def td_fmt(td):
+	s, ms = divmod(td, 1)
+	return f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
+
 
 class NBRPConfig:
 	_p = pl.Path(__file__)
 
 	host_files = list()
 	db_file = _p.parent / (_p.name.removesuffix('.py') + '.db')
+	curl_cmd = 'curl'
+	curl_ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
 
 	update_all = False
-	addr_check_timeout = 30.0 # for http and socket checks
-	log_td_info_timeout = 90.0 # switches slow log_td ops to log.info instead of debug
-	td_host_addrs = 40 * 60
-	td_addr_block = 15 * 3600
+	update_n = None
+
+	td_host_addrs = 40 * 60 # interval between re-resolving host IPs
+	td_addr_state = 15 * 3600 # service availability checks for specific addr
+	td_host_ok_state = 41 * 3600 # how long to wait for failures to return
+
+	timeout_host_addr = 28 * 3600 # to "forget" addrs that weren't seen in a while
+	timeout_addr_check = 30.0 # for http and socket checks
+	timeout_log_td_info = 90.0 # switches slow log_td ops to log.info instead of debug
+	timeout_kill = 8.0 # between SIGTERM and SIGKILL
+
 	limit_iter_hosts = 8
 	limit_iter_addrs = 5
 
@@ -98,7 +113,7 @@ class NBRPDB:
 		p = str(p)
 		with self._db_cursor() as c:
 			c.execute('savepoint ins')
-			try: return c.execute('insert into host_files (path, mtime) values (?, ?)', (p, mtime))
+			try: c.execute('insert into host_files (path, mtime) values (?, ?)', (p, mtime))
 			except self._sqlite.IntegrityError:
 				c.execute('rollback to ins')
 				c.execute('update host_files set mtime = ? where path = ?', (mtime, p))
@@ -116,33 +131,71 @@ class NBRPDB:
 			p_set_tpl = ', '.join('?'*len(p_set))
 			c.execute(f'delete from host_files where path in ({p_set_tpl})', p_set)
 
+	def _state_val(self, s):
+		if not s or s == 'skipped': return None
+		elif s == 'ok': return True
+		else: return False
+
 	_host_check = cs.namedtuple('HostCheck', 't host state')
 	def host_checks(self, ts_max, n):
 		with self._db_cursor() as c:
 			c.execute( 'select chk, host, state from hosts'
 				' where ts_check <= ? order by ts_check limit ?', (ts_max, n) )
-			return list(self._host_check(chk, host, state) for chk, host, state in c.fetchall())
+			return list(self._host_check(
+				chk, host, self._state_val(s) ) for chk, host, s in c.fetchall())
 
-	def host_update(self, ts, host, addrs=list()):
+	def host_update(self, ts, host, addrs=list(), addr_timeout=None):
 		with self._db_cursor() as c:
 			c.execute('update hosts set ts_check = ? where host = ?', (ts, host))
-			if not (addr_set := set(ip.ip_address(addr) for addr in addrs)): return
-			for addr in addr_set:
+			for addr in set(ip.ip_address(addr) for addr in addrs):
+				addr = addr.compressed
 				c.execute( 'insert or ignore into addrs'
-					' (host, addr, ts_seen) values (?, ?, ?)', (host, addr.compressed, ts) )
+					' (host, addr, ts_seen) values (?, ?, ?)', (host, addr, ts) )
 				if not c.lastrowid:
 					c.execute( 'update addrs set ts_seen = ? where'
-						' host = ? and addr = ?', (ts, host, addr.compressed) )
-					if not c.rowcount: raise LookupError(host, addr.compressed)
+						' host = ? and addr = ?', (ts, host, addr) )
+					if not c.rowcount: raise LookupError(host, addr)
+			if addr_timeout:
+				c.execute('delete from addrs where ts_seen < ?', (ts - addr_timeout,))
 
 	_addr_check = cs.namedtuple('AddrCheck', 't host addr state')
 	def addr_checks(self, ts_max, n):
 		with self._db_cursor() as c:
-			c.execute( 'select chk, host, addr, state from addrs'
-				' where ts_check <= ? join hosts on host order by ts_check limit ?', (ts_max, n) )
+			c.execute( 'select chk, host, addr, addrs.state'
+				' from addrs join hosts using (host) where addrs.ts_check <= ?'
+				' order by addrs.ts_check limit ?', (ts_max, n) )
 			return list(
-				self._addr_check(chk, host, addr, state)
-				for chk, host, addr, state in c.fetchall() )
+				self._addr_check(chk, host, ip.ip_address(addr), self._state_val(s))
+				for chk, host, addr, s in c.fetchall() )
+
+	def addr_update(self, ts, host, addr, state0, state1):
+		with self._db_cursor() as c:
+			if state0 == state1: upd, upd_args = '', list()
+			else:
+				upd = ', state = ?, ts_update = ?'
+				upd_args = 'ok' if state1 is True else (state1 or 'skipped'), ts
+			addr = ip.ip_address(addr).compressed
+			c.execute( f'update addrs set ts_check = ?{upd}'
+				' where host = ? and addr = ?', (ts, *upd_args, host, addr) )
+			if not c.rowcount: raise LookupError(host, addr)
+
+	def host_state_sync(self, ts, td_ok_flip, host_iter):
+		hs_tpl, changes = ', '.join('?'*len(hs := set(host_iter))), dict()
+		with self._db_cursor() as c:
+			c.execute( 'select host from addrs'
+				f' join hosts using (host) where host in ({hs_tpl})'
+				' and (hosts.state is null or hosts.state = ?)'
+				' and addrs.state != ? limit 1', (*hs, 'ok', 'ok') )
+			for host, in c.fetchall():
+				c.execute( 'update hosts set state = ?,'
+					' ts_update = ? where host = ?', (st := 'na', ts, host) )
+				if c.rowcount: changes[host] = st
+				hs.remove(host)
+			for host in hs:
+				c.execute( 'update hosts set state = ?, ts_update = ?'
+					' where host = ? and ts_update < ?', (st := 'ok', ts, host, ts - td_ok_flip) )
+				if c.rowcount: changes[host] = st
+		return changes
 
 
 class NBRPC:
@@ -164,10 +217,9 @@ class NBRPC:
 		if not log_fmt:
 			self.timers[tid] = time.monotonic()
 			return
-		td = time.monotonic() - self.timers[tid]
-		s, ms = divmod(td, 1)
-		td_str = f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
-		if td < self.conf.log_td_info_timeout:
+		td_str = td_fmt(td := time.monotonic() - self.timers[tid])
+		if log_fmt is ...: return td_str
+		if td < self.conf.timeout_log_td_info:
 			self.log.debug(log_fmt, *log_args, td=td_str)
 		else: self.log.info(f'[SLOW] {log_fmt}', *log_args, td=td_str)
 
@@ -198,41 +250,138 @@ class NBRPC:
 	def run(self):
 		while True:
 			self.host_map_sync()
-
-			force, self.conf.update_all = self.conf.update_all, False
+			if not (force_n := self.conf.update_n):
+				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
 			ts, tsm = time.time(), time.monotonic()
-
-			## Resolve/update host addrs
-			host_checks = self.db.host_checks(
-				(ts - self.conf.td_host_addrs) if not force else ts,
-				self.conf.limit_iter_hosts if not force else 2**32 )
-			self.log_td('hc')
-			for chk in host_checks:
-				if (svc := chk.t).startswith('tcp-'): svc = int(svc[4:])
-				elif svc not in ['http', 'https']: raise ValueError(svc)
-				self.log_td('gai')
-				try:
-					addrs = set( a[4][0] for a in socket.getaddrinfo(
-						chk.host, svc, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP ))
-				except OSError: addrs = list()
-				self.log_td('gai', 'Host getaddrinfo: {} {} [{td}]', chk.host, chk.t)
-				self.db.host_update(ts, chk.host, addrs)
-			if host_checks:
-				self.log_td( 'hc', 'Finished host-addrs'
-					' update [{td}]: {}', ' '.join(chk.host for chk in host_checks) )
-
-			break # XXX
-
-			## Check address availability
-			# for chk in self.db.addr_checks(
-			# 		ts - self.conf.td_addr_block, self.conf.limit_iter_addrs ):
-
-			## Check if host state can be flipped
-			# for chk in host_checks:
-			# XXX: state=ok + (ts_updated < x or ts_seen < x) for all addrs
+			self.run_iter(ts, force_n)
+			if self.conf.update_n: break
 
 			## Delay until next iter
 			# XXX: time.sleep(delay - (time.monotonic() - tsm))
+
+	def run_iter(self, ts, force_n=None):
+		## Resolve/update host addrs
+		host_checks = self.db.host_checks(
+			(ts - self.conf.td_host_addrs) if not force_n else ts,
+			force_n or self.conf.limit_iter_hosts )
+		self.log_td('hosts')
+		for chk in host_checks:
+			if (svc := chk.t).startswith('tcp-'): svc = int(svc[4:])
+			elif svc not in ['http', 'https']: raise ValueError(svc)
+			self.log_td('gai')
+			try:
+				addrs = set( a[4][0] for a in socket.getaddrinfo(
+					chk.host, svc, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP ))
+			except OSError as err:
+				addrs = list()
+				self.log_td( 'gai', 'Host getaddrinfo: {} {}'
+					' [{td}] - {}', chk.host, chk.t, err_fmt(err) )
+			else:
+				self.log_td( 'gai', 'Host getaddrinfo: {} {}'
+					' [addrs={} {td}]', chk.host, chk.t, len(addrs) )
+			self.db.host_update( ts, chk.host,
+				addrs, addr_timeout=self.conf.timeout_host_addr )
+		if host_checks:
+			self.log_td( 'hosts', 'Finished host-addrs'
+				' update [{td}]: {}', ' '.join(chk.host for chk in host_checks) )
+
+		## Check address availability
+		addr_checks = self.db.addr_checks(
+			(ts - self.conf.td_addr_state) if not force_n else ts,
+			force_n or self.conf.limit_iter_addrs )
+		if addr_checks:
+			self.log_td('addrs')
+			res = self.run_addr_checks(addr_checks)
+			n_fail = len(addr_checks) - (n_ok := sum((r is True) for r in res.values()))
+			self.log_td( 'addrs',
+				'Finished host-addrs check [ok={} fail={} {td}]: {}',
+				n_ok, n_fail, ' '.join(chk.addr.compressed for chk in addr_checks) )
+			for chk in addr_checks:
+				res_str = res.get(chk.addr) or 'skip-fail'
+				if res_str is True: res_str = 'OK'
+				self.log.debug( 'Host-addr check:'
+					' {} [{} {}] - {}', chk.addr.compressed, chk.t, chk.host, res_str )
+			for chk in addr_checks:
+				self.db.addr_update(ts, chk.host, chk.addr, chk.state, res.get(chk.addr))
+
+		## Check if any host states should be flipped
+		state_changes = self.db.host_state_sync( ts,
+			self.conf.td_host_ok_state, (chk.host for chk in host_checks) )
+		for host, state in state_changes.items():
+			self.log.info('Host state updated: {} = {}', host, state)
+
+
+	def run_addr_checks(self, addr_checks):
+		addr_checks_curl, addr_checks_res = dict(), dict()
+		for chk in addr_checks:
+			if chk.t not in ['http', 'https', 'dns']:
+				self.log.warning('Skipping not-implemented check type: {}', chk.t)
+			elif chk.t == 'dns': addr_checks_res[chk.addr] = True
+			else: addr_checks_curl[chk.addr] = chk
+		if not addr_checks_curl: return addr_checks_res
+
+		curl_ports = dict(http=80, https=443)
+		curl_to, curl_fmt = self.conf.timeout_addr_check, (
+			'%{urlnum} %{response_code} %{time_total}'
+			' :: %{exitcode} %{ssl_verify_result} :: %{errormsg}\n' )
+		curl = None if not addr_checks_curl else sp.Popen(
+			[ self.conf.curl_cmd, '--disable', '--config', '-',
+				'--parallel', '--parallel-immediate', '--max-time', str(curl_to) ],
+			stdin=sp.PIPE, stdout=sp.PIPE )
+
+		def curl_term(sig=None, frm=None):
+			nonlocal curl
+			if not curl: return
+			if sig:
+				td_str = self.log_td('addrs', ...)
+				self.log.warning( 'Terminating curl pid'
+					' after timeout [{:,.1f}s elapsed={}]', curl_to, td_str )
+			try:
+				curl.terminate()
+				try: curl.wait(self.conf.timeout_kill)
+				except sp.TimeoutExpired: curl.kill()
+			except OSError as err:
+				if err.errno != errno.ESRCH: raise
+			finally: curl, proc = None, curl
+			proc.wait()
+
+		signal.signal(signal.SIGALRM, curl_term)
+		signal.alarm(round(curl_to * 1.5))
+		try:
+			# Can also check tls via --cacert and --pinnedpubkey <hashes>
+			for n, chk in enumerate(addr_checks_curl.values()):
+				proto, host, addr, port = chk.t, chk.host, chk.addr.compressed, curl_ports[chk.t]
+				if ':' in addr: addr = f'[{addr}]'
+				if n: curl.stdin.write(b'next\n')
+				curl.stdin.write('\n'.join([ '',
+					f'url = "{proto}://{host}:{port}/"',
+					f'resolve = {host}:{port}:{addr}', # --connect-to can also be used
+					f'user-agent = "{self.conf.curl_ua}"',
+					f'connect-timeout = {curl_to}', f'max-time = {curl_to}',
+					*'silent disable globoff fail no-keepalive no-sessionid tcp-fastopen'.split(),
+					f'write-out = "{curl_fmt}"', 'output = /dev/null', '' ]).encode())
+			curl.stdin.flush(); curl.stdin.close()
+
+			addr_idx = list(addr_checks_curl)
+			for line_raw in curl.stdout:
+				try:
+					line = line_raw.decode().strip().split('::', 2)
+					n, code, td = line[0].split()
+					(chk_err, tls_err), curl_msg = line[1].split(), line[2]
+					try: td = td_fmt(float(td))
+					except: pass
+					chk = addr_checks_curl[addr_idx[int(n)]]
+					if chk_err:
+						chk_err = f'curl conn-fail [http={code} err={chk_err} tls={tls_err} {td}]: {curl_msg}'
+					elif not code.isdigit() or int(code) != 200: chk_err = f'curl http-fail [http={code} {td}]'
+					addr_checks_res[chk.addr] = chk_err or True
+				except Exception as err:
+					self.log.exception('Failed to process curl status line: {}', line)
+
+		finally:
+			signal.alarm(0)
+			curl_term()
+		return addr_checks_res
 
 
 def main(args=None, conf=None):
@@ -257,13 +406,14 @@ def main(args=None, conf=None):
 	parser.add_argument('-d', '--db', metavar='path', default=conf.db_file.name,
 		help='Path to sqlite database used to track host states. Default: %(default)s')
 	parser.add_argument('-t', '--addr-check-timeout',
-		type=float, metavar='seconds', default=conf.addr_check_timeout,
-		help='Timeout when checking connections to each addr/port. Default: %(default)ss')
-	parser.add_argument('-u', '--update-all',
-		action='store_true', help='Force-update all host addresses and'
-			' availability statuses regardless of last-check timestamps on start.')
+		type=float, metavar='seconds', default=conf.timeout_addr_check,
+		help='Timeout on checking address availability. Default: %(default)ss')
+	parser.add_argument('-u', '--update-all', action='store_true',
+		help='Force-update all host addresses and availability statuses on start.')
 
-	group = parser.add_argument_group('Logging options')
+	group = parser.add_argument_group('Logging and debug options')
+	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
+		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
 	group.add_argument('-q', '--quiet', action='store_true',
 		help='Do not log info about updates that normally happen, only bugs and anomalies')
 	group.add_argument('--debug', action='store_true', help='Verbose operation mode')
@@ -279,7 +429,8 @@ def main(args=None, conf=None):
 	conf.host_files = list(pl.Path(p) for p in opts.host_list_file)
 	if not conf.host_files: parser.error('No host-list files specified')
 	conf.db_file = pl.Path(opts.db)
-	conf.update_all = opts.update_all
+	conf.update_all, conf.update_n = opts.update_all, opts.force_n_checks
+	conf.timeout_addr_check = opts.addr_check_timeout
 	log.debug('Initializing nbrpc...')
 	with NBRPC(conf) as nbrpc:
 		log.debug('Starting nbrpc main loop...')
