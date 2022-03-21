@@ -459,8 +459,14 @@ class NBRPC:
 
 
 def conf_opt_info(conf):
-	intervals, timeouts, p = list(), list(), False
-	if __file__.endswith('.pyc'): # for pyinstaller and such
+	intervals, timeouts, p = list(), list(), pl.Path(__file__)
+	try:
+		if p.name.endswith('.pyc'): raise ValueError
+		lines = p.read_bytes()
+		if not lines.startswith(b'#!/usr/bin/env'): raise ValueError
+		p, lines = None, list(str.strip(line) for line in p.read_text().splitlines())
+	except: p = lines = None
+	if not lines: # pyinstaller and such
 		for pre, dst in ('td_', intervals), ('timeout_', timeouts):
 			dst.extend(textwrap.fill(
 				' '.join(
@@ -468,7 +474,7 @@ def conf_opt_info(conf):
 					for k in dir(conf) if k.startswith(pre) ),
 				width=60, break_long_words=False, break_on_hyphens=False ).splitlines())
 	else: # much nicer opts with comments
-		for line in map(str.strip, pl.Path(__file__).read_text().splitlines()):
+		for line in lines:
 			if line == 'class NBRPConfig:': p = True
 			elif p and line.startswith('class '): break
 			elif not p: continue
