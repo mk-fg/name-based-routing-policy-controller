@@ -40,8 +40,9 @@ class NBRPConfig:
 	update_all = False
 	update_n = None
 
-	td_host_addrs = 40 * 60 # interval between re-resolving host IPs
-	td_addr_state = 15 * 3600 # service availability checks for specific addr
+	td_checks = 23 * 60 # interval between running any kind of checks
+	td_host_addrs = 40 * 60 # between re-resolving host IPs
+	td_addr_state = 15 * 3600 # service availability checks for specific addrs
 	td_host_ok_state = 41 * 3600 # how long to wait for failures to return
 
 	timeout_host_addr = 28 * 3600 # to "forget" addrs that weren't seen in a while
@@ -247,17 +248,28 @@ class NBRPC:
 		for p in host_files_del: self.log.info('Hosts-file removed: {}', host_fns[p])
 		self.db.host_file_cleanup(host_files_del)
 
+	def sleep( self, seconds,
+			sigset={signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT} ):
+		if sig_info := signal.sigtimedwait(sigset, seconds):
+			sig_handler = signal.getsignal(sig_info.si_signo)
+			if callable(sig_handler): sig_handler(sig_info.si_signo, None) # INT/TERM
+			self.log.debug('Interrupted sleep-delay on signal: {}', signal.Signals(sig_info.si_signo).name)
+
 	def run(self):
+		tsm_checks = time.monotonic()
 		while True:
 			self.host_map_sync()
+
 			if not (force_n := self.conf.update_n):
 				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
-			ts, tsm = time.time(), time.monotonic()
-			self.run_iter(ts, force_n)
+			self.run_iter(time.time(), force_n)
 			if self.conf.update_n: break
 
-			## Delay until next iter
-			# XXX: time.sleep(delay - (time.monotonic() - tsm))
+			tsm = time.monotonic()
+			while tsm_checks <= tsm: tsm_checks += self.conf.td_checks
+			delay = tsm_checks - tsm
+			self.log.debug('Delay until next checks: {:,.1f}', delay)
+			self.sleep(delay)
 
 	def run_iter(self, ts, force_n=None):
 		## Resolve/update host addrs
@@ -391,8 +403,10 @@ def main(args=None, conf=None):
 	dd = lambda text: re.sub( r' \t+', ' ',
 		textwrap.dedent(text).strip('\n') + '\n' ).replace('\t', '  ')
 	parser = argparse.ArgumentParser(
-		formatter_class=argparse.RawTextHelpFormatter,
-		description='Run host resolver, availability checker and routing policy controller.')
+		formatter_class=argparse.RawTextHelpFormatter, description=dd('''
+			Run host resolver, availability checker and routing policy controller.
+			Use --debug option to get more info on what script is doing.
+			SIGHUP and SIGQUIT signals (Ctrl-\\ in a typical terminal) can be used to skip delays.'''))
 
 	parser.add_argument('-f', '--host-list-file',
 		action='append', metavar='path', default=list(),
@@ -431,7 +445,11 @@ def main(args=None, conf=None):
 	conf.db_file = pl.Path(opts.db)
 	conf.update_all, conf.update_n = opts.update_all, opts.force_n_checks
 	conf.timeout_addr_check = opts.addr_check_timeout
+
 	log.debug('Initializing nbrpc...')
+	for sig in signal.SIGINT, signal.SIGTERM:
+		signal.signal( sig, lambda sig,frm:
+			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
 	with NBRPC(conf) as nbrpc:
 		log.debug('Starting nbrpc main loop...')
 		nbrpc.run()

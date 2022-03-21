@@ -43,6 +43,7 @@ Installation and usage
 
 It's a simple Python (3.9+) script that needs python itself and curl_ tool to work.
 
-Grab and drop it in any path, and run with ``-h/--help`` option to get started.
+| Grab and drop it in any path, and run with ``-h/--help`` option to get started.
+| Use ``--debug`` option to get more insight into what script is doing.
 
 .. _curl: https://curl.se/
