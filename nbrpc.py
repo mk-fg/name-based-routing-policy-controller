@@ -41,7 +41,7 @@ class NBRPConfig:
 	update_all = False
 	update_n = None
 
-	td_checks = 23 * 60 # interval between running any kind of checks
+	td_checks = 7 * 60 # interval between running any kind of checks
 	td_host_addrs = 40 * 60 # between re-resolving host IPs
 	td_addr_state = 15 * 3600 # service availability checks for specific addrs
 	td_host_ok_state = 41 * 3600 # how long to wait for failures to return
@@ -53,8 +53,8 @@ class NBRPConfig:
 	timeout_kill = 8.0 # between SIGTERM and SIGKILL
 	timeout_policy_cmd = 30.0 # for running policy-update/replace commands
 
-	limit_iter_hosts = 8
-	limit_iter_addrs = 5
+	limit_iter_hosts = 8 # max hosts to getaddrinfo() on one iteration
+	limit_iter_addrs = 5 # limit on addrs to check in one iteration
 
 
 class NBRPDB:
@@ -459,7 +459,8 @@ class NBRPC:
 
 
 def conf_opt_info(conf):
-	intervals, timeouts, p = list(), list(), pl.Path(__file__)
+	intervals, timeouts, limits, p = list(), list(), list(), pl.Path(__file__)
+	prefixes = ('td_', intervals), ('timeout_', timeouts), ('limit_', limits)
 	try:
 		if p.name.endswith('.pyc'): raise ValueError
 		lines = p.read_bytes()
@@ -467,10 +468,10 @@ def conf_opt_info(conf):
 		p, lines = None, list(str.strip(line) for line in p.read_text().splitlines())
 	except: p = lines = None
 	if not lines: # pyinstaller and such
-		for pre, dst in ('td_', intervals), ('timeout_', timeouts):
+		for pre, dst in prefixes:
 			dst.extend(textwrap.fill(
 				' '.join(
-					f'{k[len(pre):].replace("_","-")}={getattr(conf, k):,.1f}'
+					f'{k[len(pre):].replace("_","-")}={getattr(conf, k)}'
 					for k in dir(conf) if k.startswith(pre) ),
 				width=60, break_long_words=False, break_on_hyphens=False ).splitlines())
 	else: # much nicer opts with comments
@@ -478,15 +479,15 @@ def conf_opt_info(conf):
 			if line == 'class NBRPConfig:': p = True
 			elif p and line.startswith('class '): break
 			elif not p: continue
-			for pre, dst in ('td_', intervals), ('timeout_', timeouts):
+			for pre, dst in prefixes:
 				if not line.startswith(pre): continue
 				k, v = map(str.strip, line.split('=', 1))
 				dst.append(f'- {k.removeprefix(pre).replace("_","-")} = {v}')
-	return intervals, timeouts
+	return intervals, timeouts, limits
 
 def main(args=None, conf=None):
 	if not conf: conf = NBRPConfig()
-	info_intervals, info_timeouts = conf_opt_info(conf)
+	info_intervals, info_timeouts, info_limits = conf_opt_info(conf)
 
 	import argparse
 	dd = lambda text: re.sub( r' \t+', ' ',
@@ -524,6 +525,10 @@ def main(args=None, conf=None):
 		action='append', metavar='timeout-name=seconds', default=list(),
 		help='Same as -i/--interval above, but for timeout values.'
 			' Supported timeouts:\n' + ''.join(f' {line}\n' for line in info_timeouts))
+	group.add_argument('-l', '--limit',
+		action='append', metavar='limit-name=seconds', default=list(),
+		help='Same as -i/--interval above, but for limit values.'
+			' Supported limits:\n' + ''.join(f' {line}\n' for line in info_limits))
 
 	group = parser.add_argument_group('External hook scripts')
 	group.add_argument('--policy-update-cmd', metavar='command',
@@ -563,14 +568,13 @@ def main(args=None, conf=None):
 	if not conf.host_files: parser.error('No host-list files specified')
 	conf.db_file = pl.Path(opts.db)
 	conf.update_all, conf.update_n = opts.update_all, opts.force_n_checks
-	for pre, kvs, opt in (
-			('td_', opts.interval, '-i/--interval'),
-			('timeout_', opts.timeout, '-t/--timeout') ):
+	for pre, kvs, opt in ( ('td_', opts.interval, '-i/--interval'),
+			('timeout_', opts.timeout, '-t/--timeout'), ('limit_', opts.limit, '-l/--limit') ):
 		for kv in kvs:
 			try:
 				k, v = kv.split('=', 1)
-				getattr(conf, k := pre + k.replace('-', '_'))
-				setattr(conf, k, float(v))
+				conv = type(getattr(conf, k := pre + k.replace('-', '_')))
+				setattr(conf, k, conv(v))
 			except: parser.error(f'Failed to parse {opt} value: {kv!r}')
 	for k in 'update', 'replace':
 		if v := (getattr(opts, ck := f'policy_{k}_cmd') or '').strip(): setattr(conf, ck, v.split())
