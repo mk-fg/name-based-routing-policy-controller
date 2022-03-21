@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft, subprocess as sp
 import pathlib as pl, contextlib as cl, collections as cs, ipaddress as ip
-import os, sys, re, logging, time, socket, errno, signal
+import os, sys, re, logging, time, socket, errno, signal, textwrap
 
 
 class LogMessage:
@@ -36,6 +36,7 @@ class NBRPConfig:
 	db_file = _p.parent / (_p.name.removesuffix('.py') + '.db')
 	curl_cmd = 'curl'
 	curl_ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
+	policy_update_cmd = policy_replace_cmd = None
 
 	update_all = False
 	update_n = None
@@ -50,6 +51,7 @@ class NBRPConfig:
 	timeout_addr_check = 30.0 # for http and socket checks
 	timeout_log_td_info = 90.0 # switches slow log_td ops to log.info instead of debug
 	timeout_kill = 8.0 # between SIGTERM and SIGKILL
+	timeout_policy_cmd = 30.0 # for running policy-update/replace commands
 
 	limit_iter_hosts = 8
 	limit_iter_addrs = 5
@@ -181,17 +183,19 @@ class NBRPDB:
 				' where host = ? and addr = ?', (ts, *upd_args, host, addr) )
 			if not c.rowcount: raise LookupError(host, addr)
 
-	def host_state_sync(self, ts, td_ok_flip, host_iter):
-		changes, ts_ok_max = dict(), ts - td_ok_flip
+	_addr_policy_upd = cs.namedtuple('AddrPolicyUpd', 't host state addrs')
+	def host_state_sync(self, ts, td_ok, td_na, host_iter):
+		changes, ts_ok_max, ts_na_max = list(), ts - td_ok, ts - td_na
 		with self._db_cursor() as c:
 			hs_tpl = ', '.join('?'*len(hs := set(host_iter)))
 			c.execute(
-				'select host, addr, hosts.ts_update, hosts.state, addrs.state from addrs'
-				f' join hosts using (host) where host in ({hs_tpl}) order by host', tuple(hs) )
+				'select host, chk, addr, hosts.ts_update, hosts.state, addrs.state'
+				' from addrs join hosts using (host)'
+				f' where host in ({hs_tpl}) order by host', tuple(hs) )
 			for host, host_tuples in it.groupby(c.fetchall(), key=op.itemgetter(0)):
-				sa_ipv4 = sa_ipv6 = None
-				for host, addr, ts_upd, sh, sa in host_tuples:
-					sa = self._state_val(sa)
+				addrs = set(); sa_ipv4 = sa_ipv6 = None
+				for host, chk, addr, ts_upd, sh, sa in host_tuples:
+					addrs.add(addr); sa = self._state_val(sa)
 					if ':' not in addr:
 						if sa is not True: sa_ipv4 = False
 						elif sa_ipv4 is None: sa_ipv4 = True
@@ -200,24 +204,25 @@ class NBRPDB:
 						elif sa_ipv6 is None: sa_ipv6 = True
 				sa, sh = bool(sa_ipv4 or sa_ipv6), self._state_val(sh)
 				if sa != sh:
-					if sa and ts_upd > ts_ok_max: continue # too early to enable reliably
-					changes[host] = sa
+					if sa and ts_upd > ts_ok_max: continue
+					if not sa and ts_upd > ts_na_max: continue
+					changes.append(self._addr_policy_upd(chk, host, sa, addrs))
 			if not changes: return changes
 			for st in True, False:
 				hs_tpl = ', '.join('?'*len(
-					hs := set(host for host, sa in changes.items() if sa is st) ))
+					hs := set(apu.host for apu in changes if apu.state is st) ))
 				c.execute( 'update hosts set state = ?, ts_update = ?'
 					f' where host in ({hs_tpl})', (st and 'ok' or 'na', ts, *hs) )
 				if c.rowcount != len(hs): raise LookupError(st, hs)
 		return changes
 
-	_addr_policy = cs.namedtuple('AddrPolicy', 'host state addr')
+	_addr_policy = cs.namedtuple('AddrPolicy', 't host state addr')
 	def host_state_policy(self):
 		with self._db_cursor() as c:
-			c.execute( 'select host, hosts.state, addr'
+			c.execute( 'select host, chk, hosts.state, addr'
 				' from hosts left join addrs using (host) where addr not null' )
-			return list(self._addr_policy(
-				host, self._state_val(s), addr ) for host, s, addr in c.fetchall())
+			return list(self._addr_policy( chk, host,
+				self._state_val(s), addr ) for host, chk, s, addr in c.fetchall())
 
 
 class NBRPC:
@@ -235,15 +240,25 @@ class NBRPC:
 		return self
 	def __exit__(self, *err): self.close()
 
-	def log_td(self, tid, log_fmt=None, *log_args):
+	def log_td(self, tid, log_fmt=None, *log_args, warn=False, err=False):
 		if not log_fmt:
 			self.timers[tid] = time.monotonic()
 			return
 		td_str = td_fmt(td := time.monotonic() - self.timers[tid])
 		if log_fmt is ...: return td_str
-		if td < self.conf.timeout_log_td_info:
+		if err: self.log.error(log_fmt, *log_args, td=td_str)
+		elif warn: self.log.warning(log_fmt, *log_args, td=td_str)
+		elif td < self.conf.timeout_log_td_info:
 			self.log.debug(log_fmt, *log_args, td=td_str)
 		else: self.log.info(f'[SLOW] {log_fmt}', *log_args, td=td_str)
+
+	def sleep( self, seconds,
+			sigset={signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT} ):
+		if sig_info := signal.sigtimedwait(sigset, seconds):
+			sig_handler = signal.getsignal(sig_info.si_signo)
+			if callable(sig_handler): sig_handler(sig_info.si_signo, None) # INT/TERM
+			self.log.debug( 'Interrupted sleep-delay'
+				' on signal: {}', signal.Signals(sig_info.si_signo).name )
 
 	def host_map_sync(self, _re_rem=re.compile('#.*')):
 		if self.host_map is None: self.host_map = self.db.host_map_get()
@@ -269,13 +284,6 @@ class NBRPC:
 		for p in host_files_del: self.log.info('Hosts-file removed: {}', host_fns[p])
 		self.db.host_file_cleanup(host_files_del)
 
-	def sleep( self, seconds,
-			sigset={signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGQUIT} ):
-		if sig_info := signal.sigtimedwait(sigset, seconds):
-			sig_handler = signal.getsignal(sig_info.si_signo)
-			if callable(sig_handler): sig_handler(sig_info.si_signo, None) # INT/TERM
-			self.log.debug('Interrupted sleep-delay on signal: {}', signal.Signals(sig_info.si_signo).name)
-
 	def run(self):
 		tsm_checks = time.monotonic()
 		while True:
@@ -283,8 +291,8 @@ class NBRPC:
 
 			if not (force_n := self.conf.update_n):
 				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
-			self.run_checks(time.time(), force_n)
-			self.update_policy()
+			changes = self.run_checks(time.time(), force_n)
+			if changes: self.policy_replace()
 			if self.conf.update_n: break
 
 			tsm = time.monotonic()
@@ -320,7 +328,7 @@ class NBRPC:
 				' update [{td}]: {}', ' '.join(chk.host for chk in host_checks) )
 
 		## Check address availability
-		# XXX: check it through the other route as well, likely diff instance with same db
+		# XXX: check it through the other route as well, e.g. from diff same-db instance
 		addr_checks = self.db.addr_checks(
 			(ts - self.conf.td_addr_state) if not force_n else ts,
 			force_n or self.conf.limit_iter_addrs )
@@ -340,11 +348,14 @@ class NBRPC:
 				self.db.addr_update(ts, chk.host, chk.addr, chk.state, res.get(chk.addr))
 
 		## Check if any host states should be flipped
-		# XXX: use td_host_na_state here as well
-		state_changes = self.db.host_state_sync( ts,
-			self.conf.td_host_ok_state, (chk.host for chk in host_checks) )
-		for host, state in state_changes.items():
-			self.log.info('Host state updated: {} = {}', host, state)
+		state_changes = self.db.host_state_sync(
+			ts, self.conf.td_host_ok_state, self.conf.td_host_na_state,
+			(chk.host for chk in host_checks) )
+		if state_changes:
+			for apu in state_changes:
+				self.log.info('Host state updated: {} = {}', apu.host, apu.state)
+			self.policy_update(state_changes)
+		return bool(state_changes)
 
 	def run_addr_checks(self, addr_checks):
 		addr_checks_curl, addr_checks_res = dict(), dict()
@@ -368,9 +379,8 @@ class NBRPC:
 			nonlocal curl
 			if not curl: return
 			if sig:
-				td_str = self.log_td('addrs', ...)
-				self.log.warning( 'Terminating curl pid'
-					' after timeout [{:,.1f}s elapsed={}]', curl_to, td_str )
+				self.log_td( 'addrs', 'Terminating curl pid'
+					' after timeout [limit={:,.1f}s {td}]', curl_to, warn=True )
 			try:
 				curl.terminate()
 				try: curl.wait(self.conf.timeout_kill)
@@ -420,19 +430,63 @@ class NBRPC:
 			curl_term()
 		return addr_checks_res
 
-	def update_policy(self):
-		for hsp in self.db.host_state_policy():
-			self.log.debug('Policy: {} {} = {}', hsp.host, hsp.addr, hsp.state)
-		# XXX: update nftables set here
+	def run_policy_cmd(self, hook, policy_func):
+		if not (cmd := getattr(self.conf, f'policy_{hook}_cmd')): return
+		policy = policy_func()
+		self.log_td('pu')
+		try:
+			cmd = sp.run( cmd, check=True,
+				timeout=self.conf.timeout_policy_cmd, input=policy )
+		except sp.TimeoutExpired:
+			self.log_td( 'pu', 'Policy-{} command timeout'
+				' [limit={:,.1f} {td}]', hook, self.conf.timeout_policy_cmd, err=True )
+		except sp.CalledProcessError as err:
+			self.log_td('pu', 'Policy-{} command error [{td}]: {}', hook, err_fmt(err), err=True)
+		else: self.log_td('pu', 'Policy-{} command success [{td}]', hook)
 
+	def policy_update(self, state_changes):
+		self.run_policy_cmd('update', lambda: ''.join(it.chain.from_iterable(
+			(f'{apu.state and "ok" or "na"} {apu.host} {a} {apu.t}\n' for a in apu.addrs)
+			for apu in state_changes )).encode() )
+
+	def policy_replace(self):
+		def policy_func():
+			for ap in (policy := self.db.host_state_policy()):
+				self.log.debug('Policy: {} {} {} = {}', ap.host, ap.addr, ap.t, ap.state)
+			return ''.join(( f'{ap.state and "ok" or "na"}'
+				f' {ap.host} {ap.addr} {ap.t}\n' ) for ap in policy).encode()
+		self.run_policy_cmd('replace', policy_func)
+
+
+def conf_opt_info(conf):
+	intervals, timeouts, p = list(), list(), False
+	if __file__.endswith('.pyc'): # for pyinstaller and such
+		for pre, dst in ('td_', intervals), ('timeout_', timeouts):
+			dst.extend(textwrap.fill(
+				' '.join(
+					f'{k[len(pre):].replace("_","-")}={getattr(conf, k):,.1f}'
+					for k in dir(conf) if k.startswith(pre) ),
+				width=60, break_long_words=False, break_on_hyphens=False ).splitlines())
+	else: # much nicer opts with comments
+		for line in map(str.strip, pl.Path(__file__).read_text().splitlines()):
+			if line == 'class NBRPConfig:': p = True
+			elif p and line.startswith('class '): break
+			elif not p: continue
+			for pre, dst in ('td_', intervals), ('timeout_', timeouts):
+				if not line.startswith(pre): continue
+				k, v = map(str.strip, line.split('=', 1))
+				dst.append(f'- {k.removeprefix(pre).replace("_","-")} = {v}')
+	return intervals, timeouts
 
 def main(args=None, conf=None):
 	if not conf: conf = NBRPConfig()
+	info_intervals, info_timeouts = conf_opt_info(conf)
 
-	import argparse, textwrap
+	import argparse
 	dd = lambda text: re.sub( r' \t+', ' ',
 		textwrap.dedent(text).strip('\n') + '\n' ).replace('\t', '  ')
 	parser = argparse.ArgumentParser(
+		usage='%(prog)s [options] -f hosts.txt ...',
 		formatter_class=argparse.RawTextHelpFormatter, description=dd('''
 			Run host resolver, availability checker and routing policy controller.
 			Use --debug option to get more info on what script is doing.
@@ -449,11 +503,40 @@ def main(args=None, conf=None):
 				with changes picked-up after occasional file mtime checks.'''))
 	parser.add_argument('-d', '--db', metavar='path', default=conf.db_file.name,
 		help='Path to sqlite database used to track host states. Default: %(default)s')
-	parser.add_argument('-t', '--addr-check-timeout',
-		type=float, metavar='seconds', default=conf.timeout_addr_check,
-		help='Timeout on checking address availability. Default: %(default)ss')
 	parser.add_argument('-u', '--update-all', action='store_true',
 		help='Force-update all host addresses and availability statuses on start.')
+
+	group = parser.add_argument_group('Check/update scheduling options')
+	group.add_argument('-i', '--interval',
+		action='append', metavar='interval-name=seconds', default=list(),
+		help=dd('''
+			Change specific interval value, in interval-name=seconds format.
+			Can be used multiple times to change different intervals.
+			Supported intervals with their default values:''')
+		+ ''.join(f' {line}\n' for line in info_intervals))
+	group.add_argument('-t', '--timeout',
+		action='append', metavar='timeout-name=seconds', default=list(),
+		help='Same as -i/--interval above, but for timeout values.'
+			' Supported timeouts:\n' + ''.join(f' {line}\n' for line in info_timeouts))
+
+	group = parser.add_argument_group('External hook scripts')
+	group.add_argument('--policy-update-cmd', metavar='command',
+		help=dd('''
+			Command to add/remove routing policy rules for specific IP address(-es).
+			Will be piped lines for specific policy changes to stdin, for example:
+				ok google.com 142.250.74.142 https
+				ok google.com 2a00:1450:4010:c0a::65 https
+				na example.com 1.2.3.4 http
+			There "ok" means that host's address(-es) are now available for direct connections.
+				"na" is for unavailable services that should be routed through the tunnel or whatever.
+			If command includes spaces, then it will be split into binary/arguments on those.
+			Script is expected to exit with 0 code, otherwise error will be logged.
+			These lines indicate latest policy updates, not the full state of it,
+				for which there's -x/--policy-replace-cmd option, that should be more reliable.'''))
+	group.add_argument('-x', '--policy-replace-cmd', metavar='command',
+		help=dd('''
+			Same as --policy-update-cmd option above, but always get piped a full state instead.
+			Should be more reliable for atomic ruleset updates and stuff like that.'''))
 
 	group = parser.add_argument_group('Logging and debug options')
 	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
@@ -474,7 +557,17 @@ def main(args=None, conf=None):
 	if not conf.host_files: parser.error('No host-list files specified')
 	conf.db_file = pl.Path(opts.db)
 	conf.update_all, conf.update_n = opts.update_all, opts.force_n_checks
-	conf.timeout_addr_check = opts.addr_check_timeout
+	for pre, kvs, opt in (
+			('td_', opts.interval, '-i/--interval'),
+			('timeout_', opts.timeout, '-t/--timeout') ):
+		for kv in kvs:
+			try:
+				k, v = kv.split('=', 1)
+				getattr(conf, k := pre + k.replace('-', '_'))
+				setattr(conf, k, float(v))
+			except: parser.error(f'Failed to parse {opt} value: {kv!r}')
+	for k in 'update', 'replace':
+		if v := (getattr(opts, ck := f'policy_{k}_cmd') or '').strip(): setattr(conf, ck, v.split())
 
 	log.debug('Initializing nbrpc...')
 	for sig in signal.SIGINT, signal.SIGTERM:

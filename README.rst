@@ -32,6 +32,13 @@ with script issuing notifications when those don't need to be on the list anymor
 i.e. when direct route to those works, which requires script itself to be excluded
 from the routing policy that it sets up.
 
+Actual routing should be changed by the scripts, probably run with sudo/doas to
+update `nftables sets`_, `ip-route tables`_, `ip-rules`_ or somesuch.
+
+.. _nftables sets: https://wiki.nftables.org/wiki-nftables/index.php/Sets
+.. _ip-route tables: https://man.archlinux.org/man/ip-route.8.en
+.. _ip-rules: https://man.archlinux.org/man/ip-rule.8.en
+
 
 Routing policy decision-making logic
 ------------------------------------
@@ -45,7 +52,7 @@ Some less-obvious quirks of availability-checking done by the script are listed 
   it during checks within some reasonable timeframe, like a day or two.
 
   I.e. if currently handed-out IP addr worked, and ones that were during earlier
-  checks didn't, doesn't mean that browser or whatever client will use same address,
+  checks didn't, doesn't mean that browser or some other app will use same address,
   so that whole "recently seen" superset is checked to determine if host is being
   blocked, not just the latest subset of IPs.
 
@@ -70,6 +77,8 @@ Some less-obvious quirks of availability-checking done by the script are listed 
   This is done so that this tool doesn't just track general upstream up/down
   status, but only marks things as needing a workaround when it legitimately
   works, unlike direct connection.
+
+  TODO: not implemented yet, only direct checks are made
 
 - State of the host only changes after a grace period, to avoid flapping between
   routes needlessly for whatever temporary issues, like maybe service being down
@@ -96,6 +105,6 @@ It's a simple Python (3.9+) script that needs python itself and curl_ tool to wo
 | Use ``--debug`` option to get more insight into what script is doing.
 |
 
-TODO: document how to use policy routing with nftables sets/marks here
+TODO: example on how to use policy routing with nftables sets/marks here
 
 .. _curl: https://curl.se/
