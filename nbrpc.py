@@ -44,6 +44,7 @@ class NBRPConfig:
 	td_host_addrs = 40 * 60 # between re-resolving host IPs
 	td_addr_state = 15 * 3600 # service availability checks for specific addrs
 	td_host_ok_state = 41 * 3600 # how long to wait for failures to return
+	td_host_na_state = 10 * 3600 # to wait for host to come back up maybe
 
 	timeout_host_addr = 28 * 3600 # to "forget" addrs that weren't seen in a while
 	timeout_addr_check = 30.0 # for http and socket checks
@@ -70,7 +71,7 @@ class NBRPDB:
 			host references hosts on delete cascade,
 			addr text not null, state text, ts_seen real not null,
 			ts_check real not null default 0, ts_update real not null default 0 );
-		create index if not exists addrs_pk on addrs (host, addr);
+		create unique index if not exists addrs_pk on addrs (host, addr);
 		create index if not exists addrs_ts_check on addrs (ts_check);'''
 
 	def __init__(self, path, lock_timeout=60, lazy=False):
@@ -181,29 +182,40 @@ class NBRPDB:
 			if not c.rowcount: raise LookupError(host, addr)
 
 	def host_state_sync(self, ts, td_ok_flip, host_iter):
-		hs_tpl, changes = ', '.join('?'*len(hs := set(host_iter))), dict()
-		# XXX: mark as "ok" if one of the IP families work, not if all addrs do
+		changes, ts_ok_max = dict(), ts - td_ok_flip
 		with self._db_cursor() as c:
-			c.execute( 'select host from addrs'
-				f' join hosts using (host) where host in ({hs_tpl})'
-				' and (hosts.state is null or hosts.state = ?)'
-				' and addrs.state != ? limit 1', (*hs, 'ok', 'ok') )
-			for host, in c.fetchall():
-				c.execute( 'update hosts set state = ?,'
-					' ts_update = ? where host = ?', (st := 'na', ts, host) )
-				if c.rowcount: changes[host] = st
-				hs.remove(host)
-			for host in hs:
+			hs_tpl = ', '.join('?'*len(hs := set(host_iter)))
+			c.execute(
+				'select host, addr, hosts.ts_update, hosts.state, addrs.state from addrs'
+				f' join hosts using (host) where host in ({hs_tpl}) order by host', tuple(hs) )
+			for host, host_tuples in it.groupby(c.fetchall(), key=op.itemgetter(0)):
+				sa_ipv4 = sa_ipv6 = None
+				for host, addr, ts_upd, sh, sa in host_tuples:
+					sa = self._state_val(sa)
+					if ':' not in addr:
+						if sa is not True: sa_ipv4 = False
+						elif sa_ipv4 is None: sa_ipv4 = True
+					else:
+						if sa is not True: sa_ipv6 = False
+						elif sa_ipv6 is None: sa_ipv6 = True
+				sa, sh = bool(sa_ipv4 or sa_ipv6), self._state_val(sh)
+				if sa != sh:
+					if sa and ts_upd > ts_ok_max: continue # too early to enable reliably
+					changes[host] = sa
+			if not changes: return changes
+			for st in True, False:
+				hs_tpl = ', '.join('?'*len(
+					hs := set(host for host, sa in changes.items() if sa is st) ))
 				c.execute( 'update hosts set state = ?, ts_update = ?'
-					' where host = ? and ts_update < ?', (st := 'ok', ts, host, ts - td_ok_flip) )
-				if c.rowcount: changes[host] = st
+					f' where host in ({hs_tpl})', (st and 'ok' or 'na', ts, *hs) )
+				if c.rowcount != len(hs): raise LookupError(st, hs)
 		return changes
 
 	_addr_policy = cs.namedtuple('AddrPolicy', 'host state addr')
 	def host_state_policy(self):
 		with self._db_cursor() as c:
 			c.execute( 'select host, hosts.state, addr'
-				' from hosts left join addrs using (host) having addr not null' )
+				' from hosts left join addrs using (host) where addr not null' )
 			return list(self._addr_policy(
 				host, self._state_val(s), addr ) for host, s, addr in c.fetchall())
 
@@ -272,7 +284,7 @@ class NBRPC:
 			if not (force_n := self.conf.update_n):
 				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
 			self.run_checks(time.time(), force_n)
-			# self.update_policy() XXX
+			self.update_policy()
 			if self.conf.update_n: break
 
 			tsm = time.monotonic()
@@ -308,6 +320,7 @@ class NBRPC:
 				' update [{td}]: {}', ' '.join(chk.host for chk in host_checks) )
 
 		## Check address availability
+		# XXX: check it through the other route as well, likely diff instance with same db
 		addr_checks = self.db.addr_checks(
 			(ts - self.conf.td_addr_state) if not force_n else ts,
 			force_n or self.conf.limit_iter_addrs )
@@ -327,6 +340,7 @@ class NBRPC:
 				self.db.addr_update(ts, chk.host, chk.addr, chk.state, res.get(chk.addr))
 
 		## Check if any host states should be flipped
+		# XXX: use td_host_na_state here as well
 		state_changes = self.db.host_state_sync( ts,
 			self.conf.td_host_ok_state, (chk.host for chk in host_checks) )
 		for host, state in state_changes.items():
@@ -391,10 +405,12 @@ class NBRPC:
 					(chk_err, tls_err), curl_msg = line[1].split(), line[2]
 					try: td = td_fmt(float(td))
 					except: pass
-					chk = addr_checks_curl[addr_idx[int(n)]]
+					chk_err, chk = int(chk_err), addr_checks_curl[addr_idx[int(n)]]
 					if chk_err:
-						chk_err = f'curl conn-fail [http={code} err={chk_err} tls={tls_err} {td}]: {curl_msg}'
-					elif not code.isdigit() or int(code) != 200: chk_err = f'curl http-fail [http={code} {td}]'
+						chk_err = ( f'curl conn-fail [http={code}'
+							f' err={chk_err} tls={tls_err} {td}]: {curl_msg.strip()}' )
+					elif not code.isdigit() or int(code) not in [200, 301, 302]:
+						chk_err = f'curl http-fail [http={code} {td}]'
 					addr_checks_res[chk.addr] = chk_err or True
 				except Exception as err:
 					self.log.exception('Failed to process curl status line: {}', line)
@@ -405,10 +421,9 @@ class NBRPC:
 		return addr_checks_res
 
 	def update_policy(self):
-		self.host_state_policy()
+		for hsp in self.db.host_state_policy():
+			self.log.debug('Policy: {} {} = {}', hsp.host, hsp.addr, hsp.state)
 		# XXX: update nftables set here
-
-
 
 
 def main(args=None, conf=None):
