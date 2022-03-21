@@ -8,9 +8,9 @@ A tool for monitoring service availibility and policy-routing around the issues.
 
 "The Net" won't do it all by itself however, hence the tool here.
 
-Especially useful these days, when local state, everyone around you, and
-everyone in the world hate your guts, and work together to cut you off from
-everything, if you happened to be born in a wrong place at a wrong time.
+Especially useful these days, when local state, everyone around,
+and the rest of the world hate you, working together to cut you off from
+the interwebs, if you happen to live in a wrong place at a wrong time.
 
 .. contents::
   :backlinks: none
@@ -45,5 +45,7 @@ It's a simple Python (3.9+) script that needs python itself and curl_ tool to wo
 
 | Grab and drop it in any path, and run with ``-h/--help`` option to get started.
 | Use ``--debug`` option to get more insight into what script is doing.
+
+TODO: document how to use policy routing with nftables sets/marks here
 
 .. _curl: https://curl.se/

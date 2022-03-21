@@ -182,6 +182,7 @@ class NBRPDB:
 
 	def host_state_sync(self, ts, td_ok_flip, host_iter):
 		hs_tpl, changes = ', '.join('?'*len(hs := set(host_iter))), dict()
+		# XXX: mark as "ok" if one of the IP families work, not if all addrs do
 		with self._db_cursor() as c:
 			c.execute( 'select host from addrs'
 				f' join hosts using (host) where host in ({hs_tpl})'
@@ -197,6 +198,14 @@ class NBRPDB:
 					' where host = ? and ts_update < ?', (st := 'ok', ts, host, ts - td_ok_flip) )
 				if c.rowcount: changes[host] = st
 		return changes
+
+	_addr_policy = cs.namedtuple('AddrPolicy', 'host state addr')
+	def host_state_policy(self):
+		with self._db_cursor() as c:
+			c.execute( 'select host, hosts.state, addr'
+				' from hosts left join addrs using (host) having addr not null' )
+			return list(self._addr_policy(
+				host, self._state_val(s), addr ) for host, s, addr in c.fetchall())
 
 
 class NBRPC:
@@ -262,7 +271,8 @@ class NBRPC:
 
 			if not (force_n := self.conf.update_n):
 				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
-			self.run_iter(time.time(), force_n)
+			self.run_checks(time.time(), force_n)
+			# self.update_policy() XXX
 			if self.conf.update_n: break
 
 			tsm = time.monotonic()
@@ -271,7 +281,7 @@ class NBRPC:
 			self.log.debug('Delay until next checks: {:,.1f}', delay)
 			self.sleep(delay)
 
-	def run_iter(self, ts, force_n=None):
+	def run_checks(self, ts, force_n=None):
 		## Resolve/update host addrs
 		host_checks = self.db.host_checks(
 			(ts - self.conf.td_host_addrs) if not force_n else ts,
@@ -321,7 +331,6 @@ class NBRPC:
 			self.conf.td_host_ok_state, (chk.host for chk in host_checks) )
 		for host, state in state_changes.items():
 			self.log.info('Host state updated: {} = {}', host, state)
-
 
 	def run_addr_checks(self, addr_checks):
 		addr_checks_curl, addr_checks_res = dict(), dict()
@@ -394,6 +403,12 @@ class NBRPC:
 			signal.alarm(0)
 			curl_term()
 		return addr_checks_res
+
+	def update_policy(self):
+		self.host_state_policy()
+		# XXX: update nftables set here
+
+
 
 
 def main(args=None, conf=None):
