@@ -33,10 +33,10 @@ class NBRPConfig:
 	_p = pl.Path(__file__)
 
 	host_files = list()
-	db_file = _p.parent / (_p.name.removesuffix('.py') + '.db')
+	db_file = pl.Path(_p.name.removesuffix('.py') + '.db')
 	curl_cmd = 'curl'
 	curl_ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
-	policy_update_cmd = policy_replace_cmd = None
+	policy_update_cmd = policy_replace_cmd = policy_socket = None
 
 	update_all = False
 	update_n = None
@@ -431,18 +431,31 @@ class NBRPC:
 		return addr_checks_res
 
 	def run_policy_cmd(self, hook, policy_func):
-		if not (cmd := getattr(self.conf, f'policy_{hook}_cmd')): return
+		if not (p := getattr(self.conf, f'policy_{hook}_cmd')): return
 		policy = policy_func()
 		self.log_td('pu')
-		try:
-			cmd = sp.run( cmd, check=True,
-				timeout=self.conf.timeout_policy_cmd, input=policy )
-		except sp.TimeoutExpired:
-			self.log_td( 'pu', 'Policy-{} command timeout'
-				' [limit={:,.1f} {td}]', hook, self.conf.timeout_policy_cmd, err=True )
-		except sp.CalledProcessError as err:
-			self.log_td('pu', 'Policy-{} command error [{td}]: {}', hook, err_fmt(err), err=True)
-		else: self.log_td('pu', 'Policy-{} command success [{td}]', hook)
+		if not self.conf.policy_socket:
+			try:
+				p = sp.run( p, check=True,
+					timeout=self.conf.timeout_policy_cmd, input=policy )
+			except sp.TimeoutExpired:
+				self.log_td( 'pu', 'Policy-{} command timeout'
+					' [limit={:,.1f} {td}]', hook, self.conf.timeout_policy_cmd, err=True )
+			except sp.CalledProcessError as err:
+				self.log_td('pu', 'Policy-{} command error [{td}]: {}', hook, err_fmt(err), err=True)
+			else: self.log_td('pu', 'Policy-{} command success [{td}]', hook)
+		else:
+			p, = p
+			try:
+				with socket.socket(socket.AF_UNIX) as s:
+					s.settimeout(self.conf.timeout_policy_cmd)
+					s.connect(p)
+					s.sendall(policy.strip() + b'\n\n')
+					if s.recv(3).decode() != b'OK\n': raise BrokenPipeError('Invalid ACK reply')
+			except OSError as err:
+				self.log_td( 'pu', 'Policy-{} socket error [timeout={:,.1f} {td}]:'
+					' {}', hook, self.conf.timeout_policy_cmd, err_fmt(err), err=True )
+			else: self.log_td('pu', 'Policy-{} socket-send success [{td}]', hook)
 
 	def policy_update(self, state_changes):
 		self.run_policy_cmd('update', lambda: ''.join(it.chain.from_iterable(
@@ -531,23 +544,27 @@ def main(args=None, conf=None):
 			' Supported limits:\n' + ''.join(f' {line}\n' for line in info_limits))
 
 	group = parser.add_argument_group('External hook scripts')
-	group.add_argument('--policy-update-cmd', metavar='command',
-		help=dd('''
-			Command to add/remove routing policy rules for specific IP address(-es).
-			Will be piped lines for specific policy changes to stdin, for example:
-				ok google.com 142.250.74.142 https
-				ok google.com 2a00:1450:4010:c0a::65 https
-				na example.com 1.2.3.4 http
-			There "ok" means that host's address(-es) are now available for direct connections.
-				"na" is for unavailable services that should be routed through the tunnel or whatever.
-			If command includes spaces, then it will be split into binary/arguments on those.
-			Script is expected to exit with 0 code, otherwise error will be logged.
-			These lines indicate latest policy updates, not the full state of it,
-				for which there's -x/--policy-replace-cmd option, that should be more reliable.'''))
-	group.add_argument('-x', '--policy-replace-cmd', metavar='command',
-		help=dd('''
-			Same as --policy-update-cmd option above, but always get piped a full state instead.
-			Should be more reliable for atomic ruleset updates and stuff like that.'''))
+	group.add_argument('--policy-update-cmd', metavar='command', help=dd('''
+		Command to add/remove routing policy rules for specific IP address(-es).
+		Will be piped lines for specific policy changes to stdin, for example:
+			ok google.com 142.250.74.142 https
+			ok google.com 2a00:1450:4010:c0a::65 https
+			na example.com 1.2.3.4 http
+		There "ok" means that host's address(-es) are now available for direct connections.
+			"na" is for unavailable services that should be routed through the tunnel or whatever.
+		If command includes spaces, then it will be split into binary/arguments on those.
+		Script is expected to exit with 0 code, otherwise error will be logged.
+		These lines indicate latest policy updates, not the full state of it,
+			for which there's -x/--policy-replace-cmd option, that should be more reliable.'''))
+	group.add_argument('-x', '--policy-replace-cmd', metavar='command', help=dd('''
+		Same as --policy-update-cmd option above, but always get piped a full state instead.
+		Should be more reliable for atomic ruleset updates and stuff like that.'''))
+	group.add_argument('-s', '--policy-socket', action='store_true', help=dd('''
+		Modifies --policy-*-cmd options to write same rules
+			to a unix socket at that path, instead of binary's stdin.
+		New connection is made each time, output ends with an empty line,
+			and single "OK" response-line from the other end, otherwise error is logged.
+		Can be used to separate/sandbox unprivileged "tester" part of the script easily.'''))
 
 	group = parser.add_argument_group('Logging and debug options')
 	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
@@ -566,7 +583,7 @@ def main(args=None, conf=None):
 
 	conf.host_files = list(pl.Path(p) for p in opts.host_list_file)
 	if not conf.host_files: parser.error('No host-list files specified')
-	conf.db_file = pl.Path(opts.db)
+	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
 	conf.update_all, conf.update_n = opts.update_all, opts.force_n_checks
 	for pre, kvs, opt in ( ('td_', opts.interval, '-i/--interval'),
 			('timeout_', opts.timeout, '-t/--timeout'), ('limit_', opts.limit, '-l/--limit') ):
