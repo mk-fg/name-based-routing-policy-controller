@@ -436,7 +436,7 @@ class NBRPC:
 		self.log_td('pu')
 		if not self.conf.policy_socket:
 			try:
-				p = sp.run( p, check=True,
+				sp.run( p, check=True,
 					timeout=self.conf.timeout_policy_cmd, input=policy )
 			except sp.TimeoutExpired:
 				self.log_td( 'pu', 'Policy-{} command timeout'
