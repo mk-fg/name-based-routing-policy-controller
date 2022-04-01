@@ -6,6 +6,7 @@ p_err = ft.partial(print, file=sys.stderr, flush=True)
 
 def update_iter(sock, timeout):
 	while True:
+		cr = cw = None
 		(c, addr), msg = sock.accept(), list()
 		try:
 			c.settimeout(timeout)
@@ -13,11 +14,13 @@ def update_iter(sock, timeout):
 			for line in cr:
 				if not line.strip(): break
 				msg.append(line.strip())
-			cw.write(b'OK\n'); cw.flush()
-		finally: c.close()
-		if msg:
-			msg.append(b'')
-			yield b'\n'.join(msg)
+			if msg:
+				msg.append(b'')
+				ack = yield b'\n'.join(msg)
+				if ack: cw.write(b'OK\n'); cw.flush()
+		finally:
+			if cr or cw: cr.close(); cw.close()
+			c.close()
 
 def main(args=None):
 	import argparse, textwrap
@@ -54,14 +57,18 @@ def main(args=None):
 			os.unlink(opts.socket); sock.bind(opts.socket)
 		sock.listen(8)
 		try:
-			for policy in update_iter(sock, opts.recv_timeout):
-				ts0 = time.monotonic()
+			updates = update_iter(sock, opts.recv_timeout)
+			policy = next(updates)
+			while True:
+				ts0, ack = time.monotonic(), False
 				try: sp.run(opts.policy_cmd, check=True, timeout=opts.cmd_timeout, input=policy)
 				except sp.TimeoutExpired:
 					p_err( f'ERROR: timeout running policy-command'
 						' [limit={:,.1f} {td}]', k, opts.cmd_timeout, td=time.monotonic() - ts0 )
 				except sp.CalledProcessError as err:
 					p_err(f'ERROR: policy-command failed [{td}]', k, td=time.monotonic() - ts0)
+				else: ack = True
+				policy = updates.send(ack)
 		finally: os.unlink(opts.socket)
 
 if __name__ == '__main__': sys.exit(main())

@@ -452,7 +452,8 @@ class NBRPC:
 					s.settimeout(self.conf.timeout_policy_cmd)
 					s.connect(p)
 					s.sendall(policy.strip() + b'\n\n')
-					if s.recv(3).decode() != b'OK\n': raise BrokenPipeError('Invalid ACK reply')
+					if (ack := s.recv(3)) != b'OK\n':
+						raise BrokenPipeError(f'Invalid ACK reply [ {ack} ]')
 			except OSError as err:
 				self.log_td( 'pu', 'Policy-{} socket error [timeout={:,.1f} {td}]:'
 					' {}', hook, self.conf.timeout_policy_cmd, err_fmt(err), err=True )
