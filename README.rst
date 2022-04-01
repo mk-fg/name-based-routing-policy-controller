@@ -33,7 +33,8 @@ i.e. when direct route to those works, which requires script itself to be exclud
 from the routing policy that it sets up.
 
 Actual routing should be changed by the scripts, probably run with sudo/doas to
-update `nftables sets`_, `ip-route tables`_, `ip-rules`_ or somesuch.
+update `nftables sets`_, `ip-route tables`_, `ip-rules`_ or somesuch - see examples
+below for more info.
 
 .. _nftables sets: https://wiki.nftables.org/wiki-nftables/index.php/Sets
 .. _ip-route tables: https://man.archlinux.org/man/ip-route.8.en
@@ -71,6 +72,10 @@ Some less-obvious quirks of availability-checking done by the script are listed 
 
   .. _Happy Eyeballs algorithm: https://datatracker.ietf.org/doc/html/rfc6555
 
+- Default http(s) checks are not just TCP connections, but a proper curl fetch,
+  to catch whatever mid-https RST packets and hijacking with bogus certs,
+  which seem to be common for censorship-type filtering hardware.
+
 - Service availability check on specific address consists of two parts -
   checking it via direct connection, and checking it via alternate route.
 
@@ -93,18 +98,176 @@ Some less-obvious quirks of availability-checking done by the script are listed 
 
   It's easy to flip the rules around however, by running "native" and "indirect"
   parts of the script with their routing policies reversed, and layer results from
-  that on top of direct checks at the firewall level with some simple precedence logic.
+  that on top of direct checks at the firewall level with some basic precedence logic.
 
 
-Installation and usage
-----------------------
+Setup and usage
+---------------
 
-It's a simple Python (3.9+) script that needs python itself and curl_ tool to work.
+Main nbrpc.py_ is just one Python (3.9+) script that needs curl_ tool for its
+http(s) checks, grab and drop it in any path, and run with ``-h/--help`` option
+to get started.
+``--debug`` option there can be used to get more insight into what script is doing.
 
-| Grab and drop it in any path, and run with ``-h/--help`` option to get started.
-| Use ``--debug`` option to get more insight into what script is doing.
-|
+Main script runs availability checks, but doesn't do anything beyond that by default.
 
-TODO: example on how to use policy routing with nftables sets/marks here
+It can run hooks specified via ``--policy-*-cmd`` options to control whatever
+system used for connection workarounds, or send this data to unix socket,
+e.g. to something more privileged outside its sandbox that can tweak the firewall.
 
+Trivial nbrpc-policy-cmd.py_ and nbrpc-policy-nft.py_ scripts in the repo can be
+an example of how to handle its ``-s/--policy-socket`` interactions
+(see also help for that option).
+
+
+Setup example with linux policy routing
+---------------------------------------
+
+Relatively simple way to get this tool to control network is to have it run on
+some linux router box and tweak its routing logic directly for affected IPs,
+routing traffic to those through whatever tunnel, for example.
+
+This is generally called "Policy Routing", and can be implemented in a couple
+different ways, more obvious of which are:
+
+- Add custom routes to each address that should be indirectly accessible to the
+  main routing table.
+
+  E.g. ``ip ro add 216.58.211.14 via 10.10.0.1 dev mytun``, with 10.10.0.1 being
+  a custom tunnel gateway IP on the other end.
+
+  Dead-simple, but can be somewhat messy to manage.
+
+  `ip route`_ can group/match routes by e.g. "realm" tag, so that they can be
+  nuked and replaced all together to sync with desired state.
+
+  It also has ``--json`` option, which can help managing these from scripts,
+  but it's still a suboptimal mess for this purpose.
+
+- Add default tunnel gateway to a separate routing table, and match/send
+  connections to that using linux `ip rules`_ table::
+
+    ip ro add default via 10.10.0.1 dev mytun table vpn
+    ip ru add to 216.58.211.14 lookup vpn
+
+  (table "vpn" can be either defined in ``/etc/iproute2/rt_tables`` or referred
+  to by numeric id instead)
+
+  Unlike with using default routing table above, this gives more flexibility wrt
+  controlling how indirect traffic is routed - separate table can be tweaked
+  anytime, without needing to flush and replace every rule for each IP-addr.
+
+  It's still sequential rule-matching, lots of noise (just moved from ip-route
+  to ip-rule), and messy partial updates.
+
+- Match and mark packets using powerful firewall capabilities (old iptables,
+  nftables or ebtables) and route them through diff tables based on that::
+
+    ip ro add default via 10.10.0.1 dev mytun table vpn
+    ip ru add fwmark 0x123 lookup vpn
+    nft add rule inet filter pre iifname mylan ip daddr 216.58.211.14 mark set 0x123
+
+  It's another layer of indirection, but nftables_ (linux firewall) has proper
+  IP sets with atomic updates and replacement to those.
+
+  So that one marking rule can use nftables set - e.g. ``nft add rule inet
+  filter pre iifname mylan ip daddr @nbrpc mark set 0x123`` - and those three
+  rules are basically all you ever need for dynamic policy routing.
+
+  Just gotta add/remove IPs in @nbrpc to change routing decisions, all being
+  neatly contained in that set, with very efficient packet matching,
+  and infinitely flexible too if necessary (i.e. not just dst-ip, but pretty
+  much anything, up to and including running custom BPF code on packets).
+
+  Having decisions made at the firewall level also allows to avoid this routing
+  to affect the script itself - "prerouting" hook will already ensure that, as
+  it doesn't affect locally-initiated traffic, but with e.g. "route" hook that
+  does, something trivial like ``skuid nbrpc`` can match and skip it by
+  user/group or cgroup where it's running under systemd.
+
+nbrpc-policy-nft.py_ script in this repo can be used with that last approach,
+can run separately from the main checker script (with cap_net_admin to tweak
+firewall), replacing specified IPv4/IPv6 address sets on any changes.
+
+General steps for this kind of setup:
+
+- Some kind of external tunnel, for example::
+
+    ip link add mytun type gre local 12.34.56.78 remote 98.76.54.32
+    ip addr add 10.10.0.2/24 dev mytun
+    ip addr add fddd::10:2/120 dev mytun
+    ip link set mytun up
+
+  Such GRE tunnel is nice for wrapping any IPv4/IPv6/eth traffic to go between
+  two existing IPs, but not secure to go over internet by any means - something
+  like WireGuard_ is much better for that (and GRE can go over some pre-existing
+  wg link too!).
+
+- Policy routing setup, where something can be flipped for IPs to switch between
+  direct/indirect routes::
+
+    ip ro add default via 10.10.0.1 dev mytun table vpn
+    ip ru add fwmark 0x123 lookup vpn
+
+    nft add chain inet filter route '{ type route hook output priority mangle; }'
+    nft add chain inet filter pre '{ type filter hook prerouting priority raw; }'
+    nft add chain inet filter vpn-mark;
+
+    nft add set inet filter nbrpc4 '{ type ipv4_addr; }'
+    nft add set inet filter nbrpc6 '{ type ipv6_addr; }'
+
+    nft add rule inet filter route oifname mywan jump vpn-mark  ## own traffic
+    nft add rule inet filter pre iifname mylan jump vpn-mark    ## routed traffic
+
+    add rule inet filter vpn-mark skuid nbrpc return  ## exception for main script
+    add rule inet filter vpn-mark ip daddr @nbrpc4 mark set 0x123
+    add rule inet filter vpn-mark ip6 daddr @nbrpc6 mark set 0x123
+
+  "nbrpc4" and "nbrpc6" nftables sets in this example will have a list of IPs
+  that should be routed through "vpn" table and GRE tunnel gateway there.
+
+  "type route" hook will also mark/route host's own traffic for matched IPs
+  (outgoing connections from its OS/pids), not just stuff forwarded through it.
+
+- Something to handle service availability updates from main script and update
+  routing policy::
+
+    cd ~nbrpc
+    capsh --caps='cap_net_admin+eip cap_setpcap,cap_setuid,cap_setgid+ep' \
+      --keep=1 --user=nbrpc --addamb=cap_net_admin --shell=/usr/bin/python -- \
+      ./nbrpc-policy-nft.py -s nft.sock -4 :nbrpc4 -6 :nbrpc6 -p
+
+  Long capsh command (shipped with libcap) runs nbrpc-policy-nft.py with
+  cap_net_admin_ to allow it access to the firewall without full root.
+  Same as e.g. ``AmbientCapabilities=CAP_NET_ADMIN`` with systemd.
+
+- Main nbrpc.py service running checks with its own db::
+
+    cd ~nbrpc
+    su-exec nbrpc ./nbrpc.py --debug -f hosts.txt -Ssx nft.sock
+
+  Can safely run with some unprivileged uid and/or systemd/lsm sandbox setup,
+  only needing to access nft.sock unix socket of something more privileged,
+  without starting any fancy sudo/suid things directly.
+
+- Setup tunnel endpoint and forwarding/masquerading on the other side, if missing.
+
+This is to use service status to tweak OS-level routing though,
+and failover doesn't have to be done this way - some exception-list can be used
+in a browser to direct it to use proxy server(s) for specific IPs, or something
+like Squid_ can be configured as a transparent proxy with its own config of
+rules, or maybe this routing info can be relayed to a dedicated router appliance.
+
+Main nbrpc script doesn't care either way - just give it command or socket to
+feed state/updates into and it should work.
+
+.. _nbrpc.py: nbrpc.py
+.. _nbrpc-policy-cmd.py: nbrpc-policy-cmd.py
+.. _nbrpc-policy-nft.py: nbrpc-policy-nft.py
 .. _curl: https://curl.se/
+.. _ip route: https://man.archlinux.org/man/ip-route.8.en
+.. _ip rules: https://man.archlinux.org/man/ip-rule.8.en
+.. _nftables: https://nftables.org/
+.. _WireGuard: https://www.wireguard.com/
+.. _cap_net_admin: https://man.archlinux.org/man/capabilities.7.en
+.. _Squid: http://www.squid-cache.org/

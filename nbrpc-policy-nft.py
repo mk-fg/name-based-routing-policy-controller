@@ -51,12 +51,13 @@ def main(args=None):
 	parser.add_argument('-r', '--recv-timeout',
 		type=float, default=10.0, metavar='seconds',
 		help='Timeout on receiving policy update from socket. Default: %(default)ss')
-	parser.add_argument('-4', '--nft-set4', metavar='set-ok(:set-na)', help=dd('''
+	parser.add_argument('-4', '--nft-set4', metavar='set-ok:set-na', help=dd('''
 		nftables ipv4_addr set name(s), to replace with received routing policy data.
 		Can be a single set name to replace for "ok" (directly accessible)
-			entries, or two sets for "ok" and "na" entries, separated by colon.'''))
+			entries, or two sets for "ok" and "na" entries, separated by a colon.
+		Either or both of set names can be empty strings to don't do anything with those IPs.'''))
 	parser.add_argument('-6', '--nft-set6',
-		metavar='set-ok(:set-na)', help='Same as -4/--nft-set4, but for ipv6_addr elements.')
+		metavar='set-ok:set-na', help='Same as -4/--nft-set4, but for ipv6_addr elements.')
 	parser.add_argument('-t', '--nft-table', metavar='name',
 		default='filter', help='Table where set is defined. Default: %(default)s')
 	parser.add_argument('-f', '--nft-family', metavar='name',
