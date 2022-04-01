@@ -38,7 +38,7 @@ class NBRPConfig:
 	curl_ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
 	policy_update_cmd = policy_replace_cmd = policy_socket = None
 
-	update_all = False
+	update_all = update_sync = False
 	update_n = None
 
 	td_checks = 7 * 60 # interval between running any kind of checks
@@ -291,8 +291,9 @@ class NBRPC:
 
 			if not (force_n := self.conf.update_n):
 				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
+			force_sync, self.conf.update_sync = self.conf.update_sync, False
 			changes = self.run_checks(time.time(), force_n)
-			if changes: self.policy_replace()
+			if changes or force_sync: self.policy_replace()
 			if self.conf.update_n: break
 
 			tsm = time.monotonic()
@@ -525,6 +526,8 @@ def main(args=None, conf=None):
 		help='Path to sqlite database used to track host states. Default: %(default)s')
 	parser.add_argument('-u', '--update-all', action='store_true',
 		help='Force-update all host addresses and availability statuses on start.')
+	parser.add_argument('-S', '--sync-on-start',
+		action='store_true', help='Issue full policy replace on script startup.')
 
 	group = parser.add_argument_group('Check/update scheduling options')
 	group.add_argument('-i', '--interval',
@@ -584,7 +587,8 @@ def main(args=None, conf=None):
 	conf.host_files = list(pl.Path(p) for p in opts.host_list_file)
 	if not conf.host_files: parser.error('No host-list files specified')
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
-	conf.update_all, conf.update_n = opts.update_all, opts.force_n_checks
+	conf.update_all, conf.update_sync, conf.update_n = (
+		opts.update_all, opts.sync_on_start, opts.force_n_checks )
 	for pre, kvs, opt in ( ('td_', opts.interval, '-i/--interval'),
 			('timeout_', opts.timeout, '-t/--timeout'), ('limit_', opts.limit, '-l/--limit') ):
 		for kv in kvs:
