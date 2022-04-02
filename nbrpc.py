@@ -315,8 +315,10 @@ class NBRPC:
 			elif svc not in ['http', 'https']: raise ValueError(svc)
 			self.log_td('gai')
 			try:
-				addrs = set( a[4][0] for a in socket.getaddrinfo(
-					chk.host, svc, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP ))
+				addrs = set(filter( op.attrgetter('is_global'),
+					(ip.ip_address(ai[4][0]) for ai in socket.getaddrinfo(
+						chk.host, svc, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP )) ))
+				if not addrs: raise OSError('No valid address results')
 			except OSError as err:
 				addrs = list()
 				self.log_td( 'gai', 'Host getaddrinfo: {} {}'

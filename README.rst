@@ -102,6 +102,10 @@ Some less-obvious quirks of availability-checking done by the script are listed 
   parts of the script with their routing policies reversed, and layer results from
   that on top of direct checks at the firewall level with some basic precedence logic.
 
+- Non-global/public (as in iana-ipv4/ipv6-special-registry) addrs are ignored in
+  getaddrinfo() results for all intents and purposes, to avoid hosts assigning
+  junk IPs messing with any kind of local routing or checks.
+
 
 Setup and usage
 ---------------
