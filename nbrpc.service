@@ -1,7 +1,6 @@
 [Unit]
-Requires=nbrpc-nft.service
-Wants=network.target
-After=network.target nbrpc-nft.service
+Wants=network-online.target nbrpc-nft.service
+After=network-online.target nbrpc-nft.service
 
 [Service]
 Type=exec

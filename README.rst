@@ -27,14 +27,14 @@ Purpose is to work around access issues to often-used known-in-advance websites
 that get blocked on either side of the route to them (by either state censorship
 or geo-blocking), without running all traffic through tunnels unnecessarily.
 
-List of handled hosts/names is supposed to be maintained manually,
+List of handled hostnames is supposed to be maintained manually,
 with script issuing notifications when those don't need to be on the list anymore,
 i.e. when direct route to those works, which requires script itself to be excluded
 from the routing policy that it sets up.
 
-Actual routing should be changed by the scripts, probably run with sudo/doas to
-update `nftables sets`_, `ip-route tables`_, `ip-rules`_ or somesuch - see examples
-below for more info.
+Actual routing configuration should be changed by other hook scripts, likely
+running with more access to update `nftables sets`_, `ip-route tables`_,
+`ip-rules`_ or somesuch - see examples below for more info.
 
 .. _nftables sets: https://wiki.nftables.org/wiki-nftables/index.php/Sets
 .. _ip-route tables: https://man.archlinux.org/man/ip-route.8.en
@@ -47,10 +47,11 @@ Routing policy decision-making logic
 Some less-obvious quirks of availability-checking done by the script are listed below.
 
 - Service DNS names are expected to have multiple IPs, which change anytime,
-  as CDNs might hand them out randomly depending on phase of the moon or whatever.
+  as CDNs hand them out randomly depending on time, place, load, phase of the
+  moon or whatever.
 
-  So service/host address set to check is built from all IPs that were seen for
-  it during checks within some reasonable timeframe, like a day or two.
+  So service/host address-set-to-check is built from all addrs that were seen for
+  it during checks within some reasonable timeframe, like a couple days.
 
   I.e. if currently handed-out IP addr worked, and ones that were during earlier
   checks didn't, doesn't mean that browser or some other app will use same address,
@@ -58,13 +59,13 @@ Some less-obvious quirks of availability-checking done by the script are listed 
   blocked, not just the latest subset of IPs.
 
 - Both IPv4/IPv6 are supported, and host is considered to be working directly if
-  ALL addrs withing ONE OF these address families work.
+  ALL addrs within ONE OF these address families work.
 
   Idea here is kinda similar to `Happy Eyeballs algorithm`_.
 
-  IPv6 quite often doesn't work for a service, with arbitrary connection errors
-  (refused, reset, timeout, etc), while IPv4 is perfectly fine, which is normal
-  for a lot of sites (as of 2022 at least), so not insisting on IPv6 working is fine.
+  IPv6 quite often doesn't work for a service with arbitrary connection errors
+  (refused, reset, timeout, etc), while IPv4 works perfectly fine, which is normal
+  for a lot of sites (as of 2022 at least), so not insisting on IPv6 is fine.
 
   But IPv4 can fail to work while IPv6 works due to broken filtering too,
   where either blocking is too narrow/static and site works around it by shifting
@@ -72,9 +73,10 @@ Some less-obvious quirks of availability-checking done by the script are listed 
 
   .. _Happy Eyeballs algorithm: https://datatracker.ietf.org/doc/html/rfc6555
 
-- Default http(s) checks are not just TCP connections, but a proper curl fetch,
-  to catch whatever mid-https RST packets and hijacking with bogus certs,
-  which seem to be common for censorship-type filtering hardware.
+- Default http(s) checks are not just ICMP pings or TCP connections,
+  but a proper curl fetch, to catch whatever mid-https RST packets
+  (often for downgrade to ISP's http blacklist page) and hijacking with bogus
+  certs, which seem to be common for censorship-type filtering situation.
 
 - Service availability check on specific address consists of two parts -
   checking it via direct connection, and checking it via alternate route.
@@ -86,11 +88,11 @@ Some less-obvious quirks of availability-checking done by the script are listed 
   TODO: not implemented yet, only direct checks are made
 
 - State of the host only changes after a grace period, to avoid flapping between
-  routes needlessly for whatever temporary issues, like maybe service being down
-  in one geo-region.
+  routes needlessly during whatever temporary issues, like maybe service being down
+  in one geo-region for a bit.
 
-  Both directions have different timeouts - flipping to workaround state is
-  faster than back to direct connections, to have things work a bit more smoothly.
+  Both directions have different timeouts - flipping to workaround state is faster
+  than back to direct connections, to prioritize working routes over responsiveness.
 
 - These rules/decisions assume a bias towards indirect connection being more
   reliable than direct one, as this is not a generic availability-failover tool,
@@ -111,17 +113,24 @@ to get started.
 
 Main script runs availability checks, but doesn't do anything beyond that by default.
 
-It can run hooks specified via ``--policy-*-cmd`` options to control whatever
-system used for connection workarounds, or send this data to unix socket,
+It can run hook scripts/commands specified via ``--policy-*-cmd`` options to control
+whatever system used for connection workarounds, or send this data to unix socket,
 e.g. to something more privileged outside its sandbox that can tweak the firewall.
 
-nbrpc-policy-cmd.py_ and nbrpc-policy-nft.py_ scripts in the repo can be used as
-an example of handling script's ``-s/--policy-socket`` interactions.
+nbrpc-policy-cmd.py_ and nbrpc-policy-nft.py_ scripts in the repo can be used
+instead of direct hooks with ``-s/--policy-socket`` option, and as an example
+of handling such socket interactions.
 
-\*.service unit files can be used to setup the script to run with systemd,
-though make sure to tweak Exec-lines and any paths in there.
+nbrpc.service_ and other \*.service files can be used to setup the script(s)
+to run with systemd, though make sure to tweak Exec-lines and any other paths
+in there first.
 
 Also see below for an extended OS routing integration example.
+
+.. _nbrpc.py: nbrpc.py
+.. _nbrpc-policy-cmd.py: nbrpc-policy-cmd.py
+.. _nbrpc-policy-nft.py: nbrpc-policy-nft.py
+.. _nbrpc.service: nbrpc.service
 
 
 Setup example with linux policy routing
@@ -210,9 +219,6 @@ General steps for this kind of setup:
 - Policy routing setup, where something can be flipped for IPs to switch between
   direct/indirect routes::
 
-    ip ro add default via 10.10.0.1 dev mytun table vpn
-    ip ru add fwmark 0x123 lookup vpn
-
     nft add chain inet filter route '{ type route hook output priority mangle; }'
     nft add chain inet filter pre '{ type filter hook prerouting priority raw; }'
     nft add chain inet filter vpn-mark;
@@ -223,9 +229,12 @@ General steps for this kind of setup:
     nft add rule inet filter route oifname mywan jump vpn-mark  ## own traffic
     nft add rule inet filter pre iifname mylan jump vpn-mark    ## routed traffic
 
-    add rule inet filter vpn-mark skuid nbrpc return  ## exception for main script
-    add rule inet filter vpn-mark ip daddr @nbrpc4 mark set 0x123
-    add rule inet filter vpn-mark ip6 daddr @nbrpc6 mark set 0x123
+    nft add rule inet filter vpn-mark skuid nbrpc return  ## exception for main script
+    nft add rule inet filter vpn-mark ip daddr @nbrpc4 mark set 0x123
+    nft add rule inet filter vpn-mark ip6 daddr @nbrpc6 mark set 0x123
+
+    ip ro add default via 10.10.0.1 dev mytun table vpn
+    ip ru add fwmark 0x123 lookup vpn
 
   "nbrpc4" and "nbrpc6" nftables sets in this example will have a list of IPs
   that should be routed through "vpn" table and GRE tunnel gateway there.
@@ -266,9 +275,6 @@ appliance.
 Main nbrpc script doesn't care either way - just give it command or socket to
 feed state/updates into and it should work.
 
-.. _nbrpc.py: nbrpc.py
-.. _nbrpc-policy-cmd.py: nbrpc-policy-cmd.py
-.. _nbrpc-policy-nft.py: nbrpc-policy-nft.py
 .. _curl: https://curl.se/
 .. _ip route: https://man.archlinux.org/man/ip-route.8.en
 .. _ip rules: https://man.archlinux.org/man/ip-rule.8.en

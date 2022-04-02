@@ -41,13 +41,13 @@ class NBRPConfig:
 	update_all = update_sync = False
 	update_n = None
 
-	td_checks = 7 * 60 # interval between running any kind of checks
-	td_host_addrs = 40 * 60 # between re-resolving host IPs
+	td_checks = 4 * 60 # interval between running any kind of checks
+	td_host_addrs = 7 * 60 # between re-resolving host IPs
 	td_addr_state = 15 * 3600 # service availability checks for specific addrs
 	td_host_ok_state = 41 * 3600 # how long to wait for failures to return
 	td_host_na_state = 10 * 3600 # to wait for host to come back up maybe
 
-	timeout_host_addr = 28 * 3600 # to "forget" addrs that weren't seen in a while
+	timeout_host_addr = 4 * 24 * 3600 # to "forget" addrs that weren't seen in a while
 	timeout_addr_check = 30.0 # for http and socket checks
 	timeout_log_td_info = 90.0 # switches slow log_td ops to log.info instead of debug
 	timeout_kill = 8.0 # between SIGTERM and SIGKILL
@@ -337,11 +337,13 @@ class NBRPC:
 			force_n or self.conf.limit_iter_addrs )
 		if addr_checks:
 			self.log_td('addrs')
+			checks_str = ' '.join(chk.addr.compressed for chk in addr_checks)
+			if len(checks_str) > 80: checks_str = f'[{len(addr_checks):,d}] {checks_str[:70]}...'
+			self.log.debug('Running address checks: {}', checks_str)
 			res = self.run_addr_checks(addr_checks)
 			n_fail = len(addr_checks) - (n_ok := sum((r is True) for r in res.values()))
-			self.log_td( 'addrs',
-				'Finished host-addrs check [ok={} fail={} {td}]: {}',
-				n_ok, n_fail, ' '.join(chk.addr.compressed for chk in addr_checks) )
+			self.log_td( 'addrs', 'Finished host-addrs'
+				' check [ok={} fail={} {td}]: {}', n_ok, n_fail, checks_str )
 			for chk in addr_checks:
 				res_str = res.get(chk.addr) or 'skip-fail'
 				if res_str is True: res_str = 'OK'
@@ -607,6 +609,7 @@ def main(args=None, conf=None):
 	for sig in signal.SIGINT, signal.SIGTERM:
 		signal.signal( sig, lambda sig,frm:
 			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
+	for sig in signal.SIGHUP, signal.SIGQUIT: signal.signal(sig, lambda sig,frm: None)
 	with NBRPC(conf) as nbrpc:
 		log.debug('Starting nbrpc main loop...')
 		nbrpc.run()
