@@ -36,9 +36,13 @@ Actual routing configuration should be changed by other hook scripts, likely
 running with more access to update `nftables sets`_, `ip-route tables`_,
 `ip-rules`_ or somesuch - see examples below for more info.
 
+It'd also make sense to use reasonably secure/private DNS resolution
+alongside this tool - see `DNS Privacy project`_ for more info on that.
+
 .. _nftables sets: https://wiki.nftables.org/wiki-nftables/index.php/Sets
 .. _ip-route tables: https://man.archlinux.org/man/ip-route.8.en
 .. _ip-rules: https://man.archlinux.org/man/ip-rule.8.en
+.. _DNS Privacy project: https://dnsprivacy.org/
 
 
 Routing policy decision-making logic
@@ -104,7 +108,7 @@ Some less-obvious quirks of availability-checking done by the script are listed 
 
 - Non-global/public (as in iana-ipv4/ipv6-special-registry) addrs are ignored in
   getaddrinfo() results for all intents and purposes, to avoid hosts assigning
-  junk IPs messing with any kind of local routing or checks.
+  junk IPs messing with checks or local routing.
 
 
 Setup and usage
