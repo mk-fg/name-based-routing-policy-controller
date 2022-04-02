@@ -1,0 +1,39 @@
+[Unit]
+Wants=network.target
+After=network.target
+
+[Service]
+Type=exec
+User=nbrpc
+WorkingDirectory=/srv/nbrpc
+ExecStart=nbrpc-policy-nft -4 :nbrpc4 -6 :nbrpc6 -s nft/policy.sock
+
+ReadWritePaths=/srv/nbrpc/nft
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+
+DynamicUser=yes
+ProtectProc=noaccess
+ProtectHome=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+SecureBits=keep-caps-locked noroot-locked
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+
+UMask=0077
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+ProtectClock=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectHostname=yes
+ProtectKernelTunables=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictNetworkInterfaces=
+
+[Install]
+WantedBy=multi-user.target

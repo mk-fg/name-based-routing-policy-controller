@@ -17,7 +17,8 @@ def update_iter(sock, timeout):
 			if msg:
 				msg.append(b'')
 				ack = yield b'\n'.join(msg)
-				if ack: cw.write(b'OK\n'); cw.flush()
+			else: ack = True
+			if ack: cw.write(b'OK\n'); cw.flush()
 		finally:
 			if cr or cw: cr.close(); cw.close()
 			c.close()

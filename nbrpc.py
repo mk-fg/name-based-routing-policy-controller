@@ -133,7 +133,7 @@ class NBRPDB:
 		if not (p_set := set(map(str, p_iter))): return
 		with self._db_cursor() as c:
 			p_set_tpl = ', '.join('?'*len(p_set))
-			c.execute(f'delete from host_files where path in ({p_set_tpl})', p_set)
+			c.execute(f'delete from host_files where path in ({p_set_tpl})', tuple(p_set))
 
 	def _state_val(self, s):
 		if not s or s == 'skipped': return None
@@ -281,7 +281,9 @@ class NBRPC:
 			if hf.hosts != hosts:
 				self.log.info('Hosts-file update: {} ({:,d} hosts)', host_fns[p], len(hosts))
 		host_files_del = set(self.host_map).difference(host_files)
-		for p in host_files_del: self.log.info('Hosts-file removed: {}', host_fns[p])
+		for p in host_files_del:
+			self.log.info('Hosts-file removed: {}', host_fns[p])
+			del self.host_map[p]
 		self.db.host_file_cleanup(host_files_del)
 
 	def run(self):

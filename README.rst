@@ -115,9 +115,13 @@ It can run hooks specified via ``--policy-*-cmd`` options to control whatever
 system used for connection workarounds, or send this data to unix socket,
 e.g. to something more privileged outside its sandbox that can tweak the firewall.
 
-Trivial nbrpc-policy-cmd.py_ and nbrpc-policy-nft.py_ scripts in the repo can be
-an example of how to handle its ``-s/--policy-socket`` interactions
-(see also help for that option).
+nbrpc-policy-cmd.py_ and nbrpc-policy-nft.py_ scripts in the repo can be used as
+an example of handling script's ``-s/--policy-socket`` interactions.
+
+\*.service unit files can be used to setup the script to run with systemd,
+though make sure to tweak Exec-lines and any paths in there.
+
+Also see below for an extended OS routing integration example.
 
 
 Setup example with linux policy routing
@@ -252,11 +256,12 @@ General steps for this kind of setup:
 
 - Setup tunnel endpoint and forwarding/masquerading on the other side, if missing.
 
-This is to use service status to tweak OS-level routing though,
+That is to use checked services' status to tweak OS-level routing though,
 and failover doesn't have to be done this way - some exception-list can be used
-in a browser to direct it to use proxy server(s) for specific IPs, or something
-like Squid_ can be configured as a transparent proxy with its own config of
-rules, or maybe this routing info can be relayed to a dedicated router appliance.
+in a browser plugin to direct it to use proxy server(s) for specific IPs,
+or something like Squid_ can be configured as a transparent proxy with its own
+config of rules, or maybe this routing info can be relayed to a dedicated router
+appliance.
 
 Main nbrpc script doesn't care either way - just give it command or socket to
 feed state/updates into and it should work.
