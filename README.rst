@@ -77,10 +77,15 @@ Some less-obvious quirks of availability-checking done by the script are listed 
 
   .. _Happy Eyeballs algorithm: https://datatracker.ietf.org/doc/html/rfc6555
 
-- Default http(s) checks are not just ICMP pings or TCP connections,
-  but a proper curl fetch, to catch whatever mid-https RST packets
-  (often for downgrade to ISP's http blacklist page) and hijacking with bogus
-  certs, which seem to be common for censorship-type filtering situation.
+- Default checks ("https") are not just ICMP pings or TCP connections,
+  but a curl page fetch, expecting specific http response codes,
+  to catch whatever mid-https RST packets (often for downgrade to ISP's http
+  blacklist page) and hijacking with bogus certs, which seem to be common for
+  censorship-type filtering situation.
+
+  It's possible to further customize which response code is expected by using
+  e.g. "api.twitter.com=404", where providing domain that returns 200 is tricky
+  or default redirect responses are known to indicate failure.
 
 - Service availability check on specific address consists of two parts -
   checking it via direct connection, and checking it via alternate route.
@@ -121,6 +126,9 @@ to get started.
 
 Main script runs availability checks, but doesn't do anything beyond that by default.
 
+It expects a list of services/endpoints to check with ``-f/--check-list-file``
+option, format for which is documented in `Check list file format`_ section below.
+
 It can run hook scripts/commands specified via ``--policy-*-cmd`` options to control
 whatever system used for connection workarounds, or send this data to unix socket,
 e.g. to something more privileged outside its sandbox that can tweak the firewall.
@@ -139,6 +147,40 @@ Also see below for an extended OS routing integration example.
 .. _nbrpc-policy-cmd.py: nbrpc-policy-cmd.py
 .. _nbrpc-policy-nft.py: nbrpc-policy-nft.py
 .. _nbrpc.service: nbrpc.service
+
+
+Check list file format
+----------------------
+
+Should be a space/newline-separated list of hostnames to check.
+
+Each spec can be more than just hostname: ``hostname[:check-type][=expected-result]``
+
+- ``hostname`` - hostname or address to use with getaddrinfo() for each check.
+
+  It almost always makes sense to only use names for http(s) checks, as sites
+  tend to change IPs, and names are required for https, SNI and proper vhost
+  responses anyway.
+
+- ``check-type`` - type of check to run.
+
+  Currently supported checks: ``https``, ``http``, ``dns``. Default: ``https``.
+
+- ``expected-result`` - for http(s) checks - response code(s) to treat as an OK result,
+  with anything else considered a failure, separated by slash ("/"). Default is 200/301/302.
+
+Empty lines are fine, anything after # to the end of the line is ignored as comment.
+
+Simple Example::
+
+  ## Twitter and some of its relevant subdomains
+  twitter.com
+  abs.twimg.com=400 api.twitter.com=404 # some endpoints don't return 200
+
+These config files can be missing, created, removed or changed on the fly,
+with their mtimes probed on every check interval, and contents reloaded as needed.
+
+At least one ``-f/--check-list-file`` option is required, even with nx path.
 
 
 Setup example with linux policy routing

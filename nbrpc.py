@@ -23,10 +23,13 @@ class LogStyleAdapter(logging.LoggerAdapter):
 err_fmt = lambda err: f'[{err.__class__.__name__}] {err}'
 get_logger = lambda name='': LogStyleAdapter(
 	logging.getLogger(name and 'nbrpc' or f'nbrpc.{name}') )
+log = get_logger('tmp') # for noisy temp-debug stuff
 
 def td_fmt(td):
 	s, ms = divmod(td, 1)
 	return f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
+
+def ts_fmt(ts): return time.strftime('%Y%m%d_%H:%M:%S', time.gmtime(ts))
 
 
 class NBRPConfig:
@@ -106,10 +109,11 @@ class NBRPDB:
 	_hosts_file = cs.namedtuple('Host', 'p mtime hosts')
 	def host_map_get(self):
 		with self._db_cursor() as c:
-			c.execute( 'select path, mtime, host from host_files'
-				' left join hosts on path = host_file order by path' )
+			c.execute( 'select path, mtime, host, chk'
+				' from host_files left join hosts on path = host_file order by path' )
 			return dict(
-				(p, self._hosts_file(p, rows[0][1] / 1000, set(r[2] for r in rows if r[2])))
+				( p, self._hosts_file(p, rows[0][1],
+					dict((h, chk) for _, _, h, chk in rows if h)) )
 				for p, rows in ( (pl.Path(p), list(rows))
 					for p, rows in it.groupby(c.fetchall(), key=op.itemgetter(0)) ) )
 
@@ -123,8 +127,10 @@ class NBRPDB:
 				c.execute('update host_files set mtime = ? where path = ?', (mtime, p))
 				if not c.rowcount: raise LookupError(p)
 			c.execute('release ins')
-			for h in hosts1:
-				c.execute('insert or ignore into hosts (host_file, host) values (?, ?)', (p, h))
+			for h, chk in hosts1.items():
+				if hosts0.get(h, ...) == chk: continue
+				c.execute( 'insert or replace into hosts'
+					' (host_file, host, chk) values (?, ?, ?)', (p, h, chk or 'https') )
 			if h_set_del := set(hosts0).difference(hosts1):
 				h_set_tpl = ', '.join('?'*len(h_set_del))
 				c.execute(f'delete from hosts where host in ({h_set_tpl})', tuple(h_set_del))
@@ -140,13 +146,18 @@ class NBRPDB:
 		elif s == 'ok': return True
 		else: return False
 
+	_check = cs.namedtuple('Chk', 't res')
+	def _chk(self, chk):
+		if '=' in chk: return self._check(*chk.split('=', 1))
+		return self._check(chk, None)
+
 	_host_check = cs.namedtuple('HostCheck', 't host state')
 	def host_checks(self, ts_max, n):
 		with self._db_cursor() as c:
 			c.execute( 'select chk, host, state from hosts'
 				' where ts_check <= ? order by ts_check limit ?', (ts_max, n) )
-			return list(self._host_check(
-				chk, host, self._state_val(s) ) for chk, host, s in c.fetchall())
+			return list( self._host_check(
+				self._chk(chk).t, host, self._state_val(s) ) for chk, host, s in c.fetchall())
 
 	def host_update(self, ts, host, addrs=list(), addr_timeout=None):
 		with self._db_cursor() as c:
@@ -162,14 +173,14 @@ class NBRPDB:
 			if addr_timeout:
 				c.execute('delete from addrs where ts_seen < ?', (ts - addr_timeout,))
 
-	_addr_check = cs.namedtuple('AddrCheck', 't host addr state')
+	_addr_check = cs.namedtuple('AddrCheck', 't res host addr state')
 	def addr_checks(self, ts_max, n):
 		with self._db_cursor() as c:
 			c.execute( 'select chk, host, addr, addrs.state'
 				' from addrs join hosts using (host) where addrs.ts_check <= ?'
 				' order by addrs.ts_check limit ?', (ts_max, n) )
-			return list(
-				self._addr_check(chk, host, ip.ip_address(addr), self._state_val(s))
+			return list(self._addr_check(
+					*self._chk(chk), host, ip.ip_address(addr), self._state_val(s) )
 				for chk, host, addr, s in c.fetchall() )
 
 	def addr_update(self, ts, host, addr, state0, state1):
@@ -204,9 +215,11 @@ class NBRPDB:
 						elif sa_ipv6 is None: sa_ipv6 = True
 				sa, sh = bool(sa_ipv4 or sa_ipv6), self._state_val(sh)
 				if sa != sh:
+					# log.debug( 'host-upd: {} sa={} sh={} ts[ upd={} ok={} na={} ]',
+					# 	host, sa, sh, *map(ts_fmt, [ts_upd, ts_ok_max, ts_na_max]) )
 					if sa and ts_upd > ts_ok_max: continue
 					if not sa and ts_upd > ts_na_max: continue
-					changes.append(self._addr_policy_upd(chk, host, sa, addrs))
+					changes.append(self._addr_policy_upd(self._chk(chk).t, host, sa, addrs))
 			if not changes: return changes
 			for st in True, False:
 				hs_tpl = ', '.join('?'*len(
@@ -221,7 +234,7 @@ class NBRPDB:
 		with self._db_cursor() as c:
 			c.execute( 'select host, chk, hosts.state, addr'
 				' from hosts left join addrs using (host) where addr not null' )
-			return list(self._addr_policy( chk, host,
+			return list(self._addr_policy( self._chk(chk).t, host,
 				self._state_val(s), addr ) for host, chk, s, addr in c.fetchall())
 
 
@@ -273,9 +286,16 @@ class NBRPC:
 			try: mtime = p.stat().st_mtime
 			except FileNotFoundError: mtime = 0
 			if abs( (hf := self.host_map.get( p,
-				self.db._hosts_file(p, 0, set()) )).mtime - mtime ) < 0.01: continue
-			hosts = set() if not mtime else set(it.chain.from_iterable(
-				_re_rem.sub('', line).split() for line in p.read_text().splitlines() ))
+				self.db._hosts_file(p, 0, dict()) )).mtime - mtime ) < 0.01: continue
+			hosts = dict()
+			for spec in (list() if not mtime else it.chain.from_iterable(
+					_re_rem.sub('', line).split() for line in p.read_text().splitlines() )):
+				if ':' in spec: host, chk = spec.split(':', 1)
+				elif '=' in spec:
+					host, chk = spec.split('=', 1)
+					chk = f'https={chk}'
+				else: host, chk = spec, 'https'
+				hosts[host] = chk
 			self.db.host_file_update(p, mtime, hf.hosts, hosts)
 			self.host_map[p] = self.db._hosts_file(p, mtime, hosts)
 			if hf.hosts != hosts:
@@ -367,10 +387,9 @@ class NBRPC:
 	def run_addr_checks(self, addr_checks):
 		addr_checks_curl, addr_checks_res = dict(), dict()
 		for chk in addr_checks:
-			if chk.t not in ['http', 'https', 'dns']:
-				self.log.warning('Skipping not-implemented check type: {}', chk.t)
+			if chk.t in ['http', 'https']: addr_checks_curl[chk.addr] = chk
 			elif chk.t == 'dns': addr_checks_res[chk.addr] = True
-			else: addr_checks_curl[chk.addr] = chk
+			else: self.log.warning('Skipping not-implemented check type: {}', chk.t)
 		if not addr_checks_curl: return addr_checks_res
 
 		curl_ports = dict(http=80, https=443)
@@ -381,6 +400,7 @@ class NBRPC:
 			[ self.conf.curl_cmd, '--disable', '--config', '-',
 				'--parallel', '--parallel-immediate', '--max-time', str(curl_to) ],
 			stdin=sp.PIPE, stdout=sp.PIPE )
+		curl_res_default = '200/301/302'
 
 		def curl_term(sig=None, frm=None):
 			nonlocal curl
@@ -401,8 +421,16 @@ class NBRPC:
 		signal.alarm(round(curl_to * 1.5))
 		try:
 			# Can also check tls via --cacert and --pinnedpubkey <hashes>
+			res_map = dict()
 			for n, chk in enumerate(addr_checks_curl.values()):
 				proto, host, addr, port = chk.t, chk.host, chk.addr.compressed, curl_ports[chk.t]
+				try:
+					res_map[chk.res] = set( int(n.strip() or -1)
+						for n in (chk.res or curl_res_default).split('/') )
+				except Exception as err:
+					self.log.warning( 'Skipping check with invalid result-spec'
+						' [type={} host={}]: {!r} - {}', chk.t, chk.host, chk.res, err_fmt(err) )
+					continue
 				if ':' in addr: addr = f'[{addr}]'
 				if n: curl.stdin.write(b'next\n')
 				curl.stdin.write('\n'.join([ '',
@@ -419,16 +447,19 @@ class NBRPC:
 				try:
 					line = line_raw.decode().strip().split('::', 2)
 					n, code, td = line[0].split()
-					(chk_err, tls_err), curl_msg = line[1].split(), line[2]
+					(chk_res, tls_err), curl_msg = line[1].split(), line[2]
 					try: td = td_fmt(float(td))
 					except: pass
-					chk_err, chk = int(chk_err), addr_checks_curl[addr_idx[int(n)]]
-					if chk_err:
-						chk_err = ( f'curl conn-fail [http={code}'
-							f' err={chk_err} tls={tls_err} {td}]: {curl_msg.strip()}' )
-					elif not code.isdigit() or int(code) not in [200, 301, 302]:
-						chk_err = f'curl http-fail [http={code} {td}]'
-					addr_checks_res[chk.addr] = chk_err or True
+					chk_res, chk = int(chk_res), addr_checks_curl[addr_idx[int(n)]]
+					code_chk, code = res_map[chk.res], 0 if not code.isdigit() else int(code)
+					if not code:
+						chk_res = ( f'curl conn-fail'
+							f' [err={chk_res} tls={tls_err} {td}]: {curl_msg.strip()}' )
+					elif code not in code_chk:
+						chk_res = '/'.join(map(str, code_chk))
+						chk_res = f'curl http-fail [http={code}:{chk_res} {td}]'
+					else: chk_res = True
+					addr_checks_res[chk.addr] = chk_res
 				except Exception as err:
 					self.log.exception('Failed to process curl status line: {}', line)
 
@@ -472,8 +503,8 @@ class NBRPC:
 
 	def policy_replace(self):
 		def policy_func():
-			for ap in (policy := self.db.host_state_policy()):
-				self.log.debug('Policy: {} {} {} = {}', ap.host, ap.addr, ap.t, ap.state)
+			policy = self.db.host_state_policy()
+			# for ap in policy: log.debug('Policy: {} {} {} = {}', ap.host, ap.addr, ap.t, ap.state)
 			return ''.join(( f'{ap.state and "ok" or "na"}'
 				f' {ap.host} {ap.addr} {ap.t}\n' ) for ap in policy).encode()
 		self.run_policy_cmd('replace', policy_func)
@@ -520,12 +551,16 @@ def main(args=None, conf=None):
 			Use --debug option to get more info on what script is doing.
 			SIGHUP and SIGQUIT signals (Ctrl-\\ in a typical terminal) can be used to skip delays.'''))
 
-	parser.add_argument('-f', '--host-list-file',
+	parser.add_argument('-f', '--check-list-file',
 		action='append', metavar='path', default=list(),
 		help=dd(f'''
-			File with a list of hosts (DNS names or IPs) to monitor
+			File with a list of services/endpoints to monitor
 				for availability and add alternative routes to, when necessary.
-			Hosts can be separated by spaces or newlines.
+			Format for each spec is: hostname[:check-type][=expected-result]
+				Where check-type is a service type to check, "https" by default.
+				Result for http(s) is (/-separated) response code(s), 200/301/302 by default.
+				Example: api.twitter.com=400/404
+			Specs can be separated by spaces or newlines.
 			Anything from # characters to newline is considered a comment and ignored.
 			Can be missing and/or created/updated on-the-fly,
 				with changes picked-up after occasional file mtime checks.'''))
@@ -591,8 +626,8 @@ def main(args=None, conf=None):
 	logging.basicConfig(format='%(levelname)s :: %(message)s', level=log)
 	log = get_logger()
 
-	conf.host_files = list(pl.Path(p) for p in opts.host_list_file)
-	if not conf.host_files: parser.error('No host-list files specified')
+	conf.host_files = list(pl.Path(p) for p in opts.check_list_file)
+	if not conf.host_files: parser.error('No check-list files specified')
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
 	conf.update_all, conf.update_sync, conf.update_n = (
 		opts.update_all, opts.sync_on_start, opts.force_n_checks )
