@@ -327,8 +327,8 @@ class NBRPC:
 
 			if not (force_n := self.conf.update_n):
 				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
-			force_sync, self.conf.update_sync = self.conf.update_sync, False
 			changes = self.run_checks(time.time(), force_n)
+			force_sync, self.conf.update_sync = self.conf.update_sync, False
 			if changes or force_sync: self.policy_replace()
 			if self.conf.update_n: break
 
@@ -564,7 +564,8 @@ def main(args=None, conf=None):
 		formatter_class=argparse.RawTextHelpFormatter, description=dd('''
 			Run host resolver, availability checker and routing policy controller.
 			Use --debug option to get more info on what script is doing.
-			SIGHUP and SIGQUIT signals (Ctrl-\\ in a typical terminal) can be used to skip delays.'''))
+			SIGHUP and SIGQUIT signals (Ctrl-\\ in a typical terminal) can be used
+				to skip delays, and SIGHUP also runs -x/--policy-replace-cmd, if enabled.'''))
 
 	parser.add_argument('-f', '--check-list-file',
 		action='append', metavar='path', default=list(),
@@ -574,7 +575,7 @@ def main(args=None, conf=None):
 			Format for each spec is: hostname[:check-type][=expected-result]
 				Where check-type is a service type to check, "https" by default.
 				Result for http(s) is (/-separated) response code(s), 200/301/302 by default.
-				Example: api.twitter.com=400/404
+				Examples: api.twitter.com=400 site.com:http fickle-site.net=200/503
 			Specs can be separated by spaces or newlines.
 			Anything from # characters to newline is considered a comment and ignored.
 			Can be missing and/or created/updated on-the-fly,
@@ -663,9 +664,10 @@ def main(args=None, conf=None):
 	for sig in signal.SIGINT, signal.SIGTERM:
 		signal.signal( sig, lambda sig,frm:
 			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
-	for sig in signal.SIGHUP, signal.SIGQUIT: signal.signal(sig, lambda sig,frm: None)
 	with NBRPC(conf) as nbrpc:
 		if opts.print_state: return nbrpc.print_checks()
+		signal.signal(signal.SIGQUIT, lambda sig,frm: None)
+		signal.signal(signal.SIGHUP, lambda sig,frm: setattr(conf, 'update_sync', True))
 		log.debug('Starting nbrpc main loop...')
 		nbrpc.run()
 		log.debug('Finished')

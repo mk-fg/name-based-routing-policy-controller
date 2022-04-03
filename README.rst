@@ -223,8 +223,8 @@ different ways, more obvious of which are:
   controlling how indirect traffic is routed - separate table can be tweaked
   anytime, without needing to flush and replace every rule for each IP-addr.
 
-  It's still sequential rule-matching, lots of noise (just moved from ip-route
-  to ip-rule), and messy partial updates.
+  It's still sequential rule-matching, lots of noise (moved from ip-route to
+  ip-rule table), and messy partial updates.
 
 - Match and mark packets using powerful firewall capabilities (old iptables,
   nftables or ebtables) and route them through diff tables based on that::
@@ -242,7 +242,7 @@ different ways, more obvious of which are:
 
   Just gotta add/remove IPs in @nbrpc to change routing decisions, all being
   neatly contained in that set, with very efficient packet matching,
-  and infinitely flexible too if necessary (i.e. not just dst-ip, but pretty
+  and infinitely flexible too if necessary (i.e. not only by dst-ip, but pretty
   much anything, up to and including running custom BPF code on packets).
 
   Having decisions made at the firewall level also allows to avoid this routing
@@ -301,6 +301,9 @@ General steps for this kind of setup:
   "type route" hook will also mark/route host's own traffic for matched IPs
   (outgoing connections from its OS/pids), not just stuff forwarded through it.
 
+  Firewall rules should probably be in nftables.conf file, and have a hook
+  sending SIGHUP to nbrpc on reload, to have it re-populate sets there as well.
+
 - Something to handle service availability updates from main script and update
   routing policy::
 
@@ -331,8 +334,8 @@ or something like Squid_ can be configured as a transparent proxy with its own
 config of rules, or maybe this routing info can be relayed to a dedicated router
 appliance.
 
-Main nbrpc script doesn't care either way - just give it command or socket to
-feed state/updates into and it should work.
+Main nbrpc script doesn't care either way - give it a command or socket to feed
+state/updates into and it should work.
 
 .. _curl: https://curl.se/
 .. _ip route: https://man.archlinux.org/man/ip-route.8.en
