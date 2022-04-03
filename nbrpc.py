@@ -13,7 +13,6 @@ class LogMessage:
 
 class LogStyleAdapter(logging.LoggerAdapter):
 	def __init__(self, logger, extra=None): super().__init__(logger, extra or dict())
-	def loops(self, msg, *args, **kws): return self.log(logging.LOOPS, msg, *args, **kws)
 	def log(self, level, msg, *args, **kws):
 		if not self.isEnabledFor(level): return
 		log_kws = {} if 'exc_info' not in kws else dict(exc_info=kws.pop('exc_info'))
@@ -23,13 +22,11 @@ class LogStyleAdapter(logging.LoggerAdapter):
 err_fmt = lambda err: f'[{err.__class__.__name__}] {err}'
 get_logger = lambda name='': LogStyleAdapter(
 	logging.getLogger(name and 'nbrpc' or f'nbrpc.{name}') )
-log = get_logger('tmp') # for noisy temp-debug stuff
+log = get_logger('TMP') # for noisy temp-debug stuff
 
 def td_fmt(td):
 	s, ms = divmod(td, 1)
 	return f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
-
-def ts_fmt(ts): return time.strftime('%Y%m%d_%H:%M:%S', time.gmtime(ts))
 
 
 class NBRPConfig:
@@ -98,6 +95,7 @@ class NBRPDB:
 	def _db_init(self):
 		self._db = self._sqlite.connect(**self._db_kws)
 		with self._db_cursor() as c:
+			c.execute('pragma journal_mode=wal')
 			for stmt in self._db_schema.split(';'): c.execute(stmt)
 
 	@cl.contextmanager
@@ -215,6 +213,7 @@ class NBRPDB:
 						elif sa_ipv6 is None: sa_ipv6 = True
 				sa, sh = bool(sa_ipv4 or sa_ipv6), self._state_val(sh)
 				if sa != sh:
+					# ts_fmt = lambda ts: time.strftime('%Y%m%d_%H:%M:%S', time.gmtime(ts))
 					# log.debug( 'host-upd: {} sa={} sh={} ts[ upd={} ok={} na={} ]',
 					# 	host, sa, sh, *map(ts_fmt, [ts_upd, ts_ok_max, ts_na_max]) )
 					if sa and ts_upd > ts_ok_max: continue
@@ -229,16 +228,19 @@ class NBRPDB:
 				if c.rowcount != len(hs): raise LookupError(st, hs)
 		return changes
 
-	_addr_policy = cs.namedtuple('AddrPolicy', 't host state addr')
+	_addr_policy = cs.namedtuple('AddrPolicy', 't host state addr addr_st')
 	def host_state_policy(self):
 		with self._db_cursor() as c:
-			c.execute( 'select host, chk, hosts.state, addr'
-				' from hosts left join addrs using (host) where addr not null' )
+			c.execute( 'select host, chk, hosts.state, addr, addrs.state'
+				' from hosts left join addrs using (host) where addr not null'
+				' order by host, addr like ?, addr', ('%:%',) )
 			return list(self._addr_policy( self._chk(chk).t, host,
-				self._state_val(s), addr ) for host, chk, s, addr in c.fetchall())
+				self._state_val(s), addr, sa ) for host, chk, s, addr, sa in c.fetchall())
 
 
 class NBRPC:
+	host_state_map = {None: '???', True: 'OK', False: 'blocked'}
+
 	def __init__(self, conf):
 		self.conf, self.log = conf, get_logger()
 		self.timers = dict()
@@ -305,6 +307,16 @@ class NBRPC:
 			self.log.info('Hosts-file removed: {}', host_fns[p])
 			del self.host_map[p]
 		self.db.host_file_cleanup(host_files_del)
+
+	def print_checks(self, line_len=110, line_len_diff=-16):
+		with cl.suppress(OSError): line_len = os.get_terminal_size().columns + line_len_diff
+		for host, addrs in it.groupby(self.db.host_state_policy(), key=op.attrgetter('host')):
+			for n, st in enumerate(addrs):
+				if not n: print(f'\n{st.host} [{st.t} {self.host_state_map[st.state]}]:')
+				line = f'  {st.addr} :: {st.addr_st or "???"}'
+				if len(line) > line_len: line = line[:line_len-3] + '...'
+				print(line)
+		print()
 
 	def run(self):
 		tsm_checks = time.monotonic()
@@ -375,14 +387,13 @@ class NBRPC:
 				self.db.addr_update(ts, chk.host, chk.addr, chk.state, res.get(chk.addr))
 
 		## Check if any host states should be flipped
-		state_str_map = {None: '???', True: 'OK', False: 'blocked'}
 		state_changes = self.db.host_state_sync(
 			ts, self.conf.td_host_ok_state, self.conf.td_host_na_state,
 			(chk.host for chk in host_checks) )
 		if state_changes:
 			for apu in state_changes:
-				self.log.info( 'Host state updated: {} = {} -> {}',
-					apu.host, state_str_map[apu.state0], state_str_map[apu.state] )
+				self.log.info( 'Host state updated: {} = {} -> {}', apu.host,
+					self.host_state_map[apu.state0], self.host_state_map[apu.state] )
 			self.policy_update(state_changes)
 		return bool(state_changes)
 
@@ -572,6 +583,8 @@ def main(args=None, conf=None):
 		help='Force-update all host addresses and availability statuses on start.')
 	parser.add_argument('-S', '--sync-on-start',
 		action='store_true', help='Issue full policy replace on script startup.')
+	parser.add_argument('-P', '--print-state', action='store_true',
+		help='Print current state of all host and address checks from db and exit.')
 
 	group = parser.add_argument_group('Check/update scheduling options')
 	group.add_argument('-i', '--interval',
@@ -629,7 +642,7 @@ def main(args=None, conf=None):
 	log = get_logger()
 
 	conf.host_files = list(pl.Path(p) for p in opts.check_list_file)
-	if not conf.host_files: parser.error('No check-list files specified')
+	if not (conf.host_files or opts.print_state): parser.error('No check-list files specified')
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
 	conf.update_all, conf.update_sync, conf.update_n = (
 		opts.update_all, opts.sync_on_start, opts.force_n_checks )
@@ -651,7 +664,8 @@ def main(args=None, conf=None):
 	for sig in signal.SIGHUP, signal.SIGQUIT: signal.signal(sig, lambda sig,frm: None)
 	with NBRPC(conf) as nbrpc:
 		log.debug('Starting nbrpc main loop...')
-		nbrpc.run()
+		if not opts.print_state: nbrpc.run()
+		else: nbrpc.print_checks()
 		log.debug('Finished')
 
 if __name__ == '__main__': sys.exit(main())

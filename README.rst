@@ -111,9 +111,9 @@ Some less-obvious quirks of availability-checking done by the script are listed 
   parts of the script with their routing policies reversed, and layer results from
   that on top of direct checks at the firewall level with some basic precedence logic.
 
-- Non-global/public (as in iana-ipv4/ipv6-special-registry) addrs are ignored in
+- Non-global/public addrs (as in iana-ipv4/ipv6-special-registry) are ignored in
   getaddrinfo() results for all intents and purposes, to avoid hosts assigning
-  junk IPs messing with checks or local routing.
+  junk IPs messing with any checks or local routing.
 
 
 Setup and usage
@@ -129,9 +129,10 @@ Main script runs availability checks, but doesn't do anything beyond that by def
 It expects a list of services/endpoints to check with ``-f/--check-list-file``
 option, format for which is documented in `Check list file format`_ section below.
 
-It can run hook scripts/commands specified via ``--policy-*-cmd`` options to control
-whatever system used for connection workarounds, or send this data to unix socket,
-e.g. to something more privileged outside its sandbox that can tweak the firewall.
+Hook scripts/commands can be run directly with ``--policy-*-cmd`` options,
+to control whatever system used for connection workarounds, or send this data
+to unix socket (``-s/--policy-socket`` option), e.g. to something more privileged
+outside its sandbox that can tweak the firewall.
 
 nbrpc-policy-cmd.py_ and nbrpc-policy-nft.py_ scripts in the repo can be used
 instead of direct hooks with ``-s/--policy-socket`` option, and as an example
@@ -140,6 +141,8 @@ of handling such socket interactions.
 nbrpc.service_ and other \*.service files can be used to setup the script(s)
 to run with systemd, though make sure to tweak Exec-lines and any other paths
 in there first.
+
+``-P/--print-state`` can be used to check on all host and address states anytime.
 
 Also see below for an extended OS routing integration example.
 
@@ -287,8 +290,9 @@ General steps for this kind of setup:
     nft add rule inet filter vpn-mark ip6 daddr @nbrpc6 mark set 0x123
 
     ip -4 ro add default via 10.10.0.1 dev mytun table vpn
+    ip -4 ru add fwmark 0x123 lookup vpn
     ip -6 ro add default via fddd::10:1 dev mytun table vpn
-    ip ru add fwmark 0x123 lookup vpn
+    ip -6 ru add fwmark 0x123 lookup vpn
 
   "nbrpc4" and "nbrpc6" nftables sets in this example will have a list of IPs
   that should be routed through "vpn" table and GRE tunnel gateway there,
