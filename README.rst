@@ -119,9 +119,9 @@ Some less-obvious quirks of availability-checking done by the script are listed 
 Setup and usage
 ---------------
 
-Main nbrpc.py_ is just one Python (3.9+) script that needs curl_ tool for its
-http(s) checks, grab and drop it in any path, and run with ``-h/--help`` option
-to get started.
+Main nbrpc.py_ is just one Python (3.9+) script that only needs common curl_
+tool for its http(s) checks.
+Grab and drop it into any path, run with ``-h/--help`` option to get started.
 ``--debug`` option there can be used to get more insight into what script is doing.
 
 Main script runs availability checks, but doesn't do anything beyond that by default.

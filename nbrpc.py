@@ -310,7 +310,9 @@ class NBRPC:
 
 	def print_checks(self, line_len=110, line_len_diff=-16):
 		with cl.suppress(OSError): line_len = os.get_terminal_size().columns + line_len_diff
-		for host, addrs in it.groupby(self.db.host_state_policy(), key=op.attrgetter('host')):
+		for host, addrs in sorted( ( (host, list(addrs)) for host, addrs in
+					it.groupby(self.db.host_state_policy(), key=op.attrgetter('host')) ),
+				key=lambda host_addrs: host_addrs[0][::-1] ):
 			for n, st in enumerate(addrs):
 				if not n: print(f'\n{st.host} [{st.t} {self.host_state_map[st.state]}]:')
 				line = f'  {st.addr} :: {st.addr_st or "???"}'
@@ -663,9 +665,9 @@ def main(args=None, conf=None):
 			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
 	for sig in signal.SIGHUP, signal.SIGQUIT: signal.signal(sig, lambda sig,frm: None)
 	with NBRPC(conf) as nbrpc:
+		if opts.print_state: return nbrpc.print_checks()
 		log.debug('Starting nbrpc main loop...')
-		if not opts.print_state: nbrpc.run()
-		else: nbrpc.print_checks()
+		nbrpc.run()
 		log.debug('Finished')
 
 if __name__ == '__main__': sys.exit(main())

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 
 import os, sys, errno, re, textwrap, socket, signal, functools as ft, datetime as dt
-import nftables # should be shipped with nftables tool
+import nftables # should be shipped with libnftables and nft tool
 
 p_err = ft.partial(print, file=sys.stderr, flush=True)
 
