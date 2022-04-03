@@ -194,7 +194,7 @@ class NBRPDB:
 				' where host = ? and addr = ?', (ts, *upd_args, host, addr) )
 			if not c.rowcount: raise LookupError(host, addr)
 
-	_addr_policy_upd = cs.namedtuple('AddrPolicyUpd', 't host state addrs')
+	_addr_policy_upd = cs.namedtuple('AddrPolicyUpd', 't host state0 state addrs')
 	def host_state_sync(self, ts, td_ok, td_na, host_iter):
 		changes, ts_ok_max, ts_na_max = list(), ts - td_ok, ts - td_na
 		with self._db_cursor() as c:
@@ -219,7 +219,7 @@ class NBRPDB:
 					# 	host, sa, sh, *map(ts_fmt, [ts_upd, ts_ok_max, ts_na_max]) )
 					if sa and ts_upd > ts_ok_max: continue
 					if not sa and ts_upd > ts_na_max: continue
-					changes.append(self._addr_policy_upd(self._chk(chk).t, host, sa, addrs))
+					changes.append(self._addr_policy_upd(self._chk(chk).t, host, sh, sa, addrs))
 			if not changes: return changes
 			for st in True, False:
 				hs_tpl = ', '.join('?'*len(
@@ -375,12 +375,14 @@ class NBRPC:
 				self.db.addr_update(ts, chk.host, chk.addr, chk.state, res.get(chk.addr))
 
 		## Check if any host states should be flipped
+		state_str_map = {None: '???', True: 'OK', False: 'blocked'}
 		state_changes = self.db.host_state_sync(
 			ts, self.conf.td_host_ok_state, self.conf.td_host_na_state,
 			(chk.host for chk in host_checks) )
 		if state_changes:
 			for apu in state_changes:
-				self.log.info('Host state updated: {} = {}', apu.host, apu.state)
+				self.log.info( 'Host state updated: {} = {} -> {}',
+					apu.host, state_str_map[apu.state0], state_str_map[apu.state] )
 			self.policy_update(state_changes)
 		return bool(state_changes)
 
