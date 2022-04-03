@@ -279,15 +279,20 @@ General steps for this kind of setup:
     nft add rule inet filter route oifname mywan jump vpn-mark  ## own traffic
     nft add rule inet filter pre iifname mylan jump vpn-mark    ## routed traffic
 
-    nft add rule inet filter vpn-mark skuid nbrpc return  ## exception for main script
+    ## Exception for nbrpc script itself
+    nft add rule inet filter vpn-mark skuid nbrpc ct mark set 0x123 return
+    nft add rule inet filter vpn-mark ct mark == 0x123 return   ## icmp/ack/rst after exit
+
     nft add rule inet filter vpn-mark ip daddr @nbrpc4 mark set 0x123
     nft add rule inet filter vpn-mark ip6 daddr @nbrpc6 mark set 0x123
 
-    ip ro add default via 10.10.0.1 dev mytun table vpn
+    ip -4 ro add default via 10.10.0.1 dev mytun table vpn
+    ip -6 ro add default via fddd::10:1 dev mytun table vpn
     ip ru add fwmark 0x123 lookup vpn
 
   "nbrpc4" and "nbrpc6" nftables sets in this example will have a list of IPs
-  that should be routed through "vpn" table and GRE tunnel gateway there.
+  that should be routed through "vpn" table and GRE tunnel gateway there,
+  add snat/masquerade rules after that as needed.
 
   "type route" hook will also mark/route host's own traffic for matched IPs
   (outgoing connections from its OS/pids), not just stuff forwarded through it.
