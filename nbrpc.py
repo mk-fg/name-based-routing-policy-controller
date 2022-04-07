@@ -39,7 +39,7 @@ class NBRPConfig:
 	policy_update_cmd = policy_replace_cmd = policy_socket = None
 
 	update_all = update_sync = False
-	update_n = None
+	update_n = update_host = None
 
 	td_checks = 4 * 60 # interval between running any kind of checks
 	td_host_addrs = 7 * 60 # between re-resolving host IPs
@@ -53,8 +53,9 @@ class NBRPConfig:
 	timeout_kill = 8.0 # between SIGTERM and SIGKILL
 	timeout_policy_cmd = 30.0 # for running policy-update/replace commands
 
-	limit_iter_hosts = 8 # max hosts to getaddrinfo() on one iteration
-	limit_iter_addrs = 5 # limit on addrs to check in one iteration
+	limit_iter_hosts = 9 # max hosts to getaddrinfo() on one iteration
+	limit_iter_addrs = 32 # limit on addrs to check in one iteration
+	limit_addrs_per_host = 12 # max last-seen IPs to track for each hostname
 
 
 class NBRPDB:
@@ -150,16 +151,19 @@ class NBRPDB:
 		return self._check(chk, None)
 
 	_host_check = cs.namedtuple('HostCheck', 't host state')
-	def host_checks(self, ts_max, n):
+	def host_checks(self, ts_max, n, force_host=None):
 		with self._db_cursor() as c:
+			chk, val = ( ('ts_check <= ?', ts_max)
+				if not force_host else ('host = ?', force_host) )
 			c.execute( 'select chk, host, state from hosts'
-				' where ts_check <= ? order by ts_check limit ?', (ts_max, n) )
+				f' where {chk} order by ts_check limit ?', (val, n) )
 			return list( self._host_check(
 				self._chk(chk).t, host, self._state_val(s) ) for chk, host, s in c.fetchall())
 
-	def host_update(self, ts, host, addrs=list(), addr_timeout=None):
+	def host_update(self, ts, host, addrs=list(), addr_timeout=None, addr_limit=None):
 		with self._db_cursor() as c:
 			c.execute('update hosts set ts_check = ? where host = ?', (ts, host))
+
 			for addr in set(ip.ip_address(addr) for addr in addrs):
 				addr = addr.compressed
 				c.execute( 'insert or ignore into addrs'
@@ -168,15 +172,24 @@ class NBRPDB:
 					c.execute( 'update addrs set ts_seen = ? where'
 						' host = ? and addr = ?', (ts, host, addr) )
 					if not c.rowcount: raise LookupError(host, addr)
-			if addr_timeout:
-				c.execute('delete from addrs where ts_seen < ?', (ts - addr_timeout,))
+
+			ts_cutoff = addr_timeout and (ts - addr_timeout)
+			if addr_limit:
+				c.execute( 'select ts_seen from addrs where host = ?'
+					' order by ts_seen desc limit 1 offset ?', (host, addr_limit) )
+				ts_cutoff = max(ts_cutoff or 0, (c.fetchall() or [[0]])[0][0])
+			if ts_cutoff:
+				c.execute( 'delete from addrs where'
+					' host = ? and ts_seen < ?', (host, ts_cutoff) )
 
 	_addr_check = cs.namedtuple('AddrCheck', 't res host addr state')
-	def addr_checks(self, ts_max, n):
+	def addr_checks(self, ts_max, n, force_host=None):
 		with self._db_cursor() as c:
+			chk, val = ( ('addrs.ts_check <= ?', ts_max)
+				if not force_host else ('host = ?', force_host) )
 			c.execute( 'select chk, host, addr, addrs.state'
-				' from addrs join hosts using (host) where addrs.ts_check <= ?'
-				' order by addrs.ts_check limit ?', (ts_max, n) )
+				f' from addrs join hosts using (host) where {chk}'
+				' order by addrs.ts_check limit ?', (val, n) )
 			return list(self._addr_check(
 					*self._chk(chk), host, ip.ip_address(addr), self._state_val(s) )
 				for chk, host, addr, s in c.fetchall() )
@@ -321,28 +334,31 @@ class NBRPC:
 		print()
 
 	def run(self):
-		tsm_checks = time.monotonic()
+		c, tsm_checks = self.conf, time.monotonic()
 		while True:
 			self.host_map_sync()
 
-			if not (force_n := self.conf.update_n):
-				force_n, self.conf.update_all = self.conf.update_all and 2**32, False
-			changes = self.run_checks(time.time(), force_n)
-			force_sync, self.conf.update_sync = self.conf.update_sync, False
+			if not (force_n := c.update_n):
+				force_n, c.update_all = c.update_all and 2**32, False
+			changes = self.run_checks( time.time(),
+				force_n=force_n, force_host=c.update_host )
+			force_sync, c.update_sync = c.update_sync, False
 			if changes or force_sync: self.policy_replace()
-			if self.conf.update_n: break
+			if c.update_host or c.update_n: break
 
 			tsm = time.monotonic()
-			while tsm_checks <= tsm: tsm_checks += self.conf.td_checks
+			while tsm_checks <= tsm: tsm_checks += c.td_checks
 			delay = tsm_checks - tsm
 			self.log.debug('Delay until next checks: {:,.1f}', delay)
 			self.sleep(delay)
 
-	def run_checks(self, ts, force_n=None):
+	def run_checks(self, ts, force_n=None, force_host=None):
+		if force_host: force_n = 2**32
+
 		## Resolve/update host addrs
 		host_checks = self.db.host_checks(
 			(ts - self.conf.td_host_addrs) if not force_n else ts,
-			force_n or self.conf.limit_iter_hosts )
+			force_n or self.conf.limit_iter_hosts, force_host )
 		self.log_td('hosts')
 		for chk in host_checks:
 			if (svc := chk.t).startswith('tcp-'): svc = int(svc[4:])
@@ -360,8 +376,8 @@ class NBRPC:
 			else:
 				self.log_td( 'gai', 'Host getaddrinfo: {} {}'
 					' [addrs={} {td}]', chk.host, chk.t, len(addrs) )
-			self.db.host_update( ts, chk.host,
-				addrs, addr_timeout=self.conf.timeout_host_addr )
+			self.db.host_update( ts, chk.host, addrs,
+				addr_timeout=self.conf.timeout_host_addr, addr_limit=self.conf.limit_addrs_per_host )
 		if host_checks:
 			self.log_td( 'hosts', 'Finished host-addrs'
 				' update [{td}]: {}', ' '.join(chk.host for chk in host_checks) )
@@ -370,7 +386,7 @@ class NBRPC:
 		# XXX: check it through the other route as well, e.g. from diff same-db instance
 		addr_checks = self.db.addr_checks(
 			(ts - self.conf.td_addr_state) if not force_n else ts,
-			force_n or self.conf.limit_iter_addrs )
+			force_n or self.conf.limit_iter_addrs, force_host )
 		if addr_checks:
 			self.log_td('addrs')
 			checks_str = ' '.join(chk.addr.compressed for chk in addr_checks)
@@ -389,9 +405,10 @@ class NBRPC:
 				self.db.addr_update(ts, chk.host, chk.addr, chk.state, res.get(chk.addr))
 
 		## Check if any host states should be flipped
+		if force_host: td_ok = td_na = 0
+		else: td_ok, td_na = self.conf.td_host_ok_state, self.conf.td_host_na_state
 		state_changes = self.db.host_state_sync(
-			ts, self.conf.td_host_ok_state, self.conf.td_host_na_state,
-			(chk.host for chk in host_checks) )
+			ts, td_ok, td_na, (chk.host for chk in host_checks) )
 		if state_changes:
 			for apu in state_changes:
 				self.log.info( 'Host state updated: {} = {} -> {}', apu.host,
@@ -582,7 +599,7 @@ def main(args=None, conf=None):
 				with changes picked-up after occasional file mtime checks.'''))
 	parser.add_argument('-d', '--db', metavar='path', default=conf.db_file.name,
 		help='Path to sqlite database used to track host states. Default: %(default)s')
-	parser.add_argument('-u', '--update-all', action='store_true',
+	parser.add_argument('-U', '--update-all', action='store_true',
 		help='Force-update all host addresses and availability statuses on start.')
 	parser.add_argument('-S', '--sync-on-start',
 		action='store_true', help='Issue full policy replace on script startup.')
@@ -630,6 +647,13 @@ def main(args=None, conf=None):
 		Can be used to separate/sandbox unprivileged "tester" part of the script easily.'''))
 
 	group = parser.add_argument_group('Logging and debug options')
+	group.add_argument('-u', '--update-host', metavar='host',
+		help=dd('''
+			Force check/update specified host status and exit.
+			This runs hostname check, all of relevant address
+				checks and force-updates availability status from those,
+				regardless of any grace period(s) and timeouts for this host.
+			Can be combined with -S/--sync-on-start to force-replace policy before exit.'''))
 	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
 		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
 	group.add_argument('-q', '--quiet', action='store_true',
@@ -647,8 +671,8 @@ def main(args=None, conf=None):
 	conf.host_files = list(pl.Path(p) for p in opts.check_list_file)
 	if not (conf.host_files or opts.print_state): parser.error('No check-list files specified')
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
-	conf.update_all, conf.update_sync, conf.update_n = (
-		opts.update_all, opts.sync_on_start, opts.force_n_checks )
+	conf.update_all, conf.update_sync = opts.update_all, opts.sync_on_start
+	conf.update_host, conf.update_n = opts.update_host, opts.force_n_checks
 	for pre, kvs, opt in ( ('td_', opts.interval, '-i/--interval'),
 			('timeout_', opts.timeout, '-t/--timeout'), ('limit_', opts.limit, '-l/--limit') ):
 		for kv in kvs:
