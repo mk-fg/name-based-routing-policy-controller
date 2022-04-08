@@ -344,3 +344,47 @@ state/updates into and it should work.
 .. _WireGuard: https://www.wireguard.com/
 .. _cap_net_admin: https://man.archlinux.org/man/capabilities.7.en
 .. _Squid: http://www.squid-cache.org/
+
+
+Related links, tips and such trivia
+-----------------------------------
+
+- Even though examples here use "nft add rule" as command examples for simplicity,
+  it's generally a really bad idea to configure firewall like that - use same
+  exact "add rule" commands in a single nftables.conf file instead.
+
+  Difference is that conf file is processed and applied/rejected atomically,
+  so that firewall can't end up in an arbitrary broken state due to some rules
+  failing to apply - either everything gets configured as specified, or error
+  is signaled and nothing is changed.
+
+- Masquerading traffic going through the tunnel can be done in the usual way,
+  via forward+reverse traffic-matching rules in the "forward" hook and
+  "masquerade" or "snat" rule applied by the "nat" hook.
+
+  Given that relevant outgoing traffic should already be marked for routing,
+  it can be matched by that mark, or combined with iface names anyway::
+
+    nft add rule inet filter forward iifname lan oifname mytun cm mark 0x123 accept
+    nft add rule inet filter forward iifname mytun oifname lan accept
+    nft add rule inet nat postrouting oifname mytun cm mark 0x123 masquerade
+
+- Tunnels tend to have lower MTU than whatever endpoints might have set on their
+  interfaces, so `clamping that via nftables`_ is usually a good idea::
+
+    nft add rule inet filter forward tcp flags syn tcp option maxseg size set rt mtu
+
+  This can be tested via e.g. ``ping -4M do -s $((1500-28)) somehost.net``
+  (1500B MTU - 8B ICMP header - 20B IPv4 header) plus the usual tcpdump to see
+  MSS on TCP connections and actual packet sizes, and it's quite often not what
+  you expect, so always worth checking at least everywhere where tunneling or
+  whatever overlay protocols are involved.
+
+  .. _clamping that via nftables:
+    https://wiki.nftables.org/wiki-nftables/index.php/Mangling_packet_headers
+
+- `"Dynamic policy routing to work around internet restrictions" blog post`_
+  with a bit more context and info around this script.
+
+  .. _"Dynamic policy routing to work around internet restrictions" blog post:
+    https://blog.fraggod.net/2022/04/05/dynamic-policy-routing-to-work-around-internet-restrictions.html
