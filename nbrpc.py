@@ -258,9 +258,7 @@ class NBRPC:
 		self.timers = dict()
 
 	def close(self):
-		if self.db:
-			self.db.close()
-			self.db = None
+		if self.db: self.db = self.db.close()
 	def __enter__(self):
 		self.db = NBRPDB(self.conf.db_file)
 		self.host_map = None
@@ -584,8 +582,7 @@ def main(args=None, conf=None):
 				to skip delays, and SIGHUP also runs -x/--policy-replace-cmd, if enabled.'''))
 
 	parser.add_argument('-f', '--check-list-file',
-		action='append', metavar='path', default=list(),
-		help=dd(f'''
+		action='append', metavar='path', default=list(), help=dd('''
 			File with a list of services/endpoints to monitor
 				for availability and add alternative routes to, when necessary.
 			Format for each spec is: hostname[:check-type][=expected-result]
@@ -607,8 +604,7 @@ def main(args=None, conf=None):
 
 	group = parser.add_argument_group('Check/update scheduling options')
 	group.add_argument('-i', '--interval',
-		action='append', metavar='interval-name=seconds', default=list(),
-		help=dd('''
+		action='append', metavar='interval-name=seconds', default=list(), help=dd('''
 			Change specific interval value, in interval-name=seconds format.
 			Can be used multiple times to change different intervals.
 			Supported intervals with their default values:''')
@@ -646,18 +642,17 @@ def main(args=None, conf=None):
 		Can be used to separate/sandbox unprivileged "tester" part of the script easily.'''))
 
 	group = parser.add_argument_group('Logging and debug options')
-	group.add_argument('-u', '--update-host', metavar='host',
-		help=dd('''
-			Force check/update specified host status and exit.
-			This runs hostname check, all of relevant address
-				checks and force-updates availability status from those,
-				regardless of any grace period(s) and timeouts for this host.
-			Can be combined with -S/--sync-on-start to force-replace policy before exit.'''))
+	group.add_argument('-u', '--update-host', metavar='host', help=dd('''
+		Force check/update specified host status and exit.
+		This runs hostname check, all of relevant address
+			checks and force-updates availability status from those,
+			regardless of any grace period(s) and timeouts for this host.
+		Can be combined with -S/--sync-on-start to force-replace policy before exit.'''))
 	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
 		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
 	group.add_argument('-q', '--quiet', action='store_true',
-		help='Do not log info about updates that normally happen, only bugs and anomalies')
-	group.add_argument('--debug', action='store_true', help='Verbose operation mode')
+		help='Do not log info about updates that normally happen, only bugs and anomalies.')
+	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
