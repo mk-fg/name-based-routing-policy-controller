@@ -63,6 +63,8 @@ def main(args=None):
 		default='filter', help='Table where set is defined. Default: %(default)s')
 	parser.add_argument('-f', '--nft-family', metavar='name',
 		default='inet', help='Family of the specified -t/--nft-table. Default: %(default)s')
+	parser.add_argument('-q', '--quiet', action='store_true',
+		help='Do not print warnings about address conflicts and such.')
 	parser.add_argument('-p', '--nft-print', action='store_true',
 		help='Pretty-print all JSON commands being issued to update libnftables to stdout.')
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
@@ -79,16 +81,26 @@ def main(args=None):
 			if err.errno != errno.EADDRINUSE: raise
 			os.unlink(opts.socket); sock.bind(opts.socket)
 		sock.listen(8)
+		stn = dict(ok='na', na='ok')
 		try:
 			updates = update_iter(sock, opts.recv_timeout)
 			policy = next(updates)
 			while True:
 				addrs = dict(
-					ok=dict(ipv4_addr=set(), ipv6_addr=set()),
-					na=dict(ipv4_addr=set(), ipv6_addr=set()) )
+					ok=dict(ipv4_addr=dict(), ipv6_addr=dict()),
+					na=dict(ipv4_addr=dict(), ipv6_addr=dict()) )
 				for line in policy.decode().strip().splitlines():
 					st, name, addr, svc = line.split()
-					addrs[st]['ipv4_addr' if ':' not in addr else 'ipv6_addr'].add(addr)
+					af = 'ipv4_addr' if ':' not in addr else 'ipv6_addr'
+					addrs_st, addrs_stn = addrs[st][af], addrs[stn[st]][af]
+					warn_name = warn_policy = None
+					if warn_name := addrs_st.get(addr): warn_policy = 'same'
+					if warn_name := addrs_stn.get(addr): warn_policy = 'opposite'
+					else: addrs_st[addr] = name
+					if warn_name and not opts.quiet:
+						p_err( 'WARN: duplicate address'
+							f' ({warn_policy} policy) - {addr} [{name} / {warn_name}]' )
+
 				nft_update = dict(nftables=(nft_cmds := list()))
 				for sn, st in (opts.nft_set4, 'ipv4_addr'), (opts.nft_set6, 'ipv6_addr'):
 					if not sn: continue
@@ -100,6 +112,7 @@ def main(args=None):
 						nft_cmds.append(dict(flush=dict(set=set_id)))
 						if not addrs[sv][st]: continue
 						nft_cmds.append(dict(add=dict(set=dict(**set_id, elem=list(addrs[sv][st])))))
+
 				if opts.nft_print: p_nft_json(nft_cmds)
 				err, output, err_msg = nft.json_cmd(nft_update)
 				if err:
