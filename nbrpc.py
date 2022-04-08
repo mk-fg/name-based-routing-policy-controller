@@ -215,16 +215,15 @@ class NBRPDB:
 				' from addrs join hosts using (host)'
 				f' where host in ({hs_tpl}) order by host', tuple(hs) )
 			for host, host_tuples in it.groupby(c.fetchall(), key=op.itemgetter(0)):
-				addrs = set(); sa_ipv4 = sa_ipv6 = None
+				addrs, sas = set(), (set(), set())
 				for host, chk, addr, ts_upd, sh, sa in host_tuples:
-					addrs.add(addr); sa = self._state_val(sa)
-					if ':' not in addr:
-						if sa is not True: sa_ipv4 = False
-						elif sa_ipv4 is None: sa_ipv4 = True
-					else:
-						if sa is not True: sa_ipv6 = False
-						elif sa_ipv6 is None: sa_ipv6 = True
-				sa, sh = bool(sa_ipv4 or sa_ipv6), self._state_val(sh)
+					addrs.add(addr); sas[':' in addr].add(self._state_val(sa))
+				sa, sh = None, self._state_val(sh)
+				for saf in sas:
+					saf = list(sa for sa in saf if sa is not None)
+					if not saf: continue # all-unknowns
+					if all(sa is True for sa in saf): sa = True; break # any family all-good
+					sa = False # any family not all-good = N/A state
 				if sa != sh:
 					# ts_fmt = lambda ts: time.strftime('%Y%m%d_%H:%M:%S', time.gmtime(ts))
 					# log.debug( 'host-upd: {} sa={} sh={} ts[ upd={} ok={} na={} ]',
