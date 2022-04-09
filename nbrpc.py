@@ -28,6 +28,8 @@ def td_fmt(td):
 	s, ms = divmod(td, 1)
 	return f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
 
+ts_fmt = lambda ts: time.strftime('%Y-%m-%d.%H:%M', time.gmtime(ts))
+
 
 class NBRPConfig:
 	_p = pl.Path(__file__)
@@ -44,8 +46,8 @@ class NBRPConfig:
 	td_checks = 4 * 60 # interval between running any kind of checks
 	td_host_addrs = 7 * 60 # between re-resolving host IPs
 	td_addr_state = 15 * 3600 # service availability checks for specific addrs
-	td_host_ok_state = 41 * 3600 # how long to wait for failures to return
-	td_host_na_state = 10 * 3600 # to wait for host to come back up maybe
+	td_host_ok_state = 41 * 3600 # how long to wait resetting failures back to ok
+	td_host_na_state = 10 * 3600 # grace period to wait for host to maybe come back up
 
 	timeout_host_addr = 4 * 24 * 3600 # to "forget" addrs that weren't seen in a while
 	timeout_addr_check = 30.0 # for http and socket checks
@@ -142,7 +144,7 @@ class NBRPDB:
 
 	def _state_val(self, s):
 		if not s or s == 'skipped': return None
-		elif s == 'ok': return True
+		elif s in ['ok', 'failing']: return True
 		else: return False
 
 	_check = cs.namedtuple('Chk', 't res')
@@ -207,7 +209,13 @@ class NBRPDB:
 
 	_addr_policy_upd = cs.namedtuple('AddrPolicyUpd', 't host state0 state addrs')
 	def host_state_sync(self, ts, td_ok, td_na, host_iter):
+		# Host state changes always bump ts_update, and go like this:
+		#  ??? -> [ok, na] ::
+		#  ok -[chk-fail]-> failing :: na -[chk-ok + td_ok]-> ok ::
+		#  failing -[chk-ok]-> ok :: failing -[chk-fail + td_na]-> na
+		# Outside of db, "failing" state translates to True, same as "ok".
 		changes, ts_ok_max, ts_na_max = list(), ts - td_ok, ts - td_na
+		hs_failing, hs_rec = list(), list()
 		with self._db_cursor() as c:
 			hs_tpl = ', '.join('?'*len(hs := set(host_iter)))
 			c.execute(
@@ -216,42 +224,51 @@ class NBRPDB:
 				f' where host in ({hs_tpl}) order by host', tuple(hs) )
 			for host, host_tuples in it.groupby(c.fetchall(), key=op.itemgetter(0)):
 				addrs, sas = set(), (set(), set())
-				for host, chk, addr, ts_upd, sh, sa in host_tuples:
+				for host, chk, addr, ts_upd, shs, sa in host_tuples:
 					addrs.add(addr); sas[':' in addr].add(self._state_val(sa))
-				sa, sh = None, self._state_val(sh)
+				sa, sh = None, self._state_val(shs)
 				for saf in sas:
 					saf = list(sa for sa in saf if sa is not None)
 					if not saf: continue # all-unknowns
 					if all(sa is True for sa in saf): sa = True; break # any family all-good
 					sa = False # any family not all-good = N/A state
 				if sa != sh:
-					# ts_fmt = lambda ts: time.strftime('%Y%m%d_%H:%M:%S', time.gmtime(ts))
-					# log.debug( 'host-upd: {} sa={} sh={} ts[ upd={} ok={} na={} ]',
-					# 	host, sa, sh, *map(ts_fmt, [ts_upd, ts_ok_max, ts_na_max]) )
+					# log.debug( 'host-upd: {} sa={} sh={}/{} ts[ upd={} ok={} na={} ]',
+					# 	host, sa, sh, shs, *map(ts_fmt, [ts_upd, ts_ok_max, ts_na_max]) )
 					if sa and ts_upd > ts_ok_max: continue
-					if not sa and ts_upd > ts_na_max: continue
+					if not sa:
+						if ts_upd > ts_na_max: continue
+						if shs == 'ok': hs_failing.append(host); continue
 					changes.append(self._addr_policy_upd(self._chk(chk).t, host, sh, sa, addrs))
-			if not changes: return changes
-			for st in True, False:
-				hs_tpl = ', '.join('?'*len(
-					hs := set(apu.host for apu in changes if apu.state is st) ))
-				c.execute( 'update hosts set state = ?, ts_update = ?'
-					f' where host in ({hs_tpl})', (st and 'ok' or 'na', ts, *hs) )
-				if c.rowcount != len(hs): raise LookupError(st, hs)
+				elif sa and shs == 'failing': hs_rec.append(host)
+			for stk, hs in ('failing', hs_failing), ('ok', hs_rec), (True, ...), (False, ...):
+				if hs is ...:
+					hs = set(apu.host for apu in changes if apu.state is st)
+					st = 'ok' if stk else 'na'
+				else: st = stk
+				if not hs: continue
+				hs_tpl = ', '.join('?'*len(hs))
+				c.execute( 'update hosts set state = ?,'
+					f' ts_update = ? where host in ({hs_tpl})', (st, ts, *hs) )
+				if c.rowcount != len(hs): raise LookupError(stk, hs)
 		return changes
 
-	_addr_policy = cs.namedtuple('AddrPolicy', 't host state addr addr_st')
-	def host_state_policy(self):
+	_addr_policy = cs.namedtuple( 'AddrPolicy',
+		't host state state_ts addr addr_st addr_st_ts' )
+	def host_state_policy(self, st_raw=False):
 		with self._db_cursor() as c:
-			c.execute( 'select host, chk, hosts.state, addr, addrs.state'
+			c.execute(
+				'select host, chk, hosts.state,'
+					' hosts.ts_update, addr, addrs.state, addrs.ts_update'
 				' from hosts left join addrs using (host) where addr not null'
 				' order by host, addr like ?, addr', ('%:%',) )
-			return list(self._addr_policy( self._chk(chk).t, host,
-				self._state_val(s), addr, sa ) for host, chk, s, addr, sa in c.fetchall())
+			return list(
+				self._addr_policy( self._chk(chk).t, host,
+					self._state_val(s) if not st_raw else s, s_ts, addr, sa, sa_ts )
+				for host, chk, s, s_ts, addr, sa, sa_ts in c.fetchall() )
 
 
 class NBRPC:
-	host_state_map = {None: '???', True: 'OK', False: 'blocked'}
 
 	def __init__(self, conf):
 		self.conf, self.log = conf, get_logger()
@@ -321,11 +338,11 @@ class NBRPC:
 	def print_checks(self, line_len=110, line_len_diff=-16):
 		with cl.suppress(OSError): line_len = os.get_terminal_size().columns + line_len_diff
 		for host, addrs in sorted( ( (host, list(addrs)) for host, addrs in
-					it.groupby(self.db.host_state_policy(), key=op.attrgetter('host')) ),
+					it.groupby(self.db.host_state_policy(st_raw=True), key=op.attrgetter('host')) ),
 				key=lambda host_addrs: host_addrs[0][::-1] ):
 			for n, st in enumerate(addrs):
-				if not n: print(f'\n{st.host} [{st.t} {self.host_state_map[st.state]}]:')
-				line = f'  {st.addr} :: {st.addr_st or "???"}'
+				if not n: print(f'\n{st.host} [{st.t} {st.state or "???"} @ {ts_fmt(st.state_ts)}]:')
+				line = f'  {st.addr} :: [{ts_fmt(st.addr_st_ts)}] {st.addr_st or "???"}'
 				if len(line) > line_len: line = line[:line_len-3] + '...'
 				print(line)
 		print()
@@ -407,9 +424,10 @@ class NBRPC:
 		state_changes = self.db.host_state_sync(
 			ts, td_ok, td_na, (chk.host for chk in host_checks) )
 		if state_changes:
+			host_state_str = {None: '???', True: 'OK', False: 'blocked'}
 			for apu in state_changes:
-				self.log.info( 'Host state updated: {} = {} -> {}', apu.host,
-					self.host_state_map[apu.state0], self.host_state_map[apu.state] )
+				self.log.info( 'Host state updated: {} = {} -> {}',
+					apu.host, host_state_str[apu.state0], host_state_str[apu.state] )
 			self.policy_update(state_changes)
 		return bool(state_changes)
 
