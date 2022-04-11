@@ -262,7 +262,7 @@ class NBRPDB:
 				elif sa and shs == 'failing': hs_rec.append(host)
 			for stk, hs in ('failing', hs_failing), ('ok', hs_rec), (True, ...), (False, ...):
 				if hs is ...:
-					hs = set(apu.host for apu in changes if apu.state is st)
+					hs = set(apu.host for apu in changes if apu.state is stk)
 					st = 'ok' if stk else 'na'
 				else: st = stk
 				if not hs: continue

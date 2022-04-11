@@ -356,8 +356,8 @@ Related links, tips, info and trivia
   Potential quirks when doing that can be:
 
   - Changing check types for host(s) while these checks are running might cause
-    addr-check and host state to be set based on check-type/result info from
-    when the check was started, but should be fixed by the next check after that.
+    address and host state to be set based on type/result info from when that
+    check was started, which should be fixed by the next run.
 
   - If this script is used with giant lists/DBs or on a slow host/storage
     (like an old RPi1 with slow SD card under I/O load), db transactions can
@@ -368,9 +368,10 @@ Related links, tips, info and trivia
   with only exception being various manual checks and debug-runs,
   using e.g. ``-P/--print-state``, ``-u/--update-host`` and such options.
 
-- Even though examples here use "nft add rule" as command examples for simplicity,
+- Even though examples here have "nft add rule" commands for simplicity,
   it's generally a really bad idea to configure firewall like that - use same
-  exact "add rule" commands in a single nftables.conf file instead.
+  exact "add rule" commands or rule-lines in table blocks within a single
+  nftables.conf file instead.
 
   Difference is that conf file is processed and applied/rejected atomically,
   so that firewall can't end up in an arbitrary broken state due to some rules
@@ -381,15 +382,16 @@ Related links, tips, info and trivia
   via forward+reverse traffic-matching rules in the "forward" hook and
   "masquerade" or "snat" rule applied by the "nat" hook.
 
-  Given that relevant outgoing traffic should already be marked for routing,
-  it can be matched by that mark, or combined with iface names anyway::
+  In the setup example above, given that relevant outgoing traffic should
+  already be marked for routing, it can be matched by that mark, or combined
+  with iface names anyway::
 
     nft add rule inet filter forward iifname lan oifname mytun cm mark 0x123 accept
     nft add rule inet filter forward iifname mytun oifname lan accept
     nft add rule inet nat postrouting oifname mytun cm mark 0x123 masquerade
 
 - Tunnels tend to have lower MTU than whatever endpoints might have set on their
-  interfaces, so `clamping that via nftables`_ is usually a good idea::
+  interfaces, so `clamping TCP MSS via nftables`_ is usually a good idea::
 
     nft add rule inet filter forward tcp flags syn tcp option maxseg size set rt mtu
 
@@ -399,13 +401,13 @@ Related links, tips, info and trivia
   you expect, so always worth checking at least everywhere where tunneling or
   whatever overlay protocols are involved.
 
-  .. _clamping that via nftables:
+  .. _clamping TCP MSS via nftables:
     https://wiki.nftables.org/wiki-nftables/index.php/Mangling_packet_headers
 
-- While intended to work around various network disruptions, it can also be used
-  in the exact opposite way - to detect when specific web stuff is accessible
-  and block it, simply by reading "ok" result in policy-updates as undesirable
-  (instead of "na", adding blocking rules), e.g. in a pihole_-like scenario.
+- While intended to work around various network disruptions, this stuff can also
+  be used in the exact opposite way - to detect when specific endpoints are
+  accessible and block them - simply by reading "ok" result in policy-updates as
+  undesirable (instead of "na", adding blocking rules), e.g. in a pihole_-like scenario.
 
   .. _pihole: https://pi-hole.net/
 
