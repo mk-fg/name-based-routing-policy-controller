@@ -346,8 +346,27 @@ state/updates into and it should work.
 .. _Squid: http://www.squid-cache.org/
 
 
-Related links, tips and such trivia
------------------------------------
+Related links, tips, info and trivia
+------------------------------------
+
+- Main script keeps all its state in an sqlite db file (using WAL mode),
+  isolating all state changes in exclusive db transactions, so should be fine to
+  run multiple instances of it with the same source files and db anytime.
+
+  Potential quirks when doing that can be:
+
+  - Changing check types for host(s) while these checks are running might cause
+    addr-check and host state to be set based on check-type/result info from
+    when the check was started, but should be fixed by the next check after that.
+
+  - If this script is used with giant lists/DBs or on a slow host/storage
+    (like an old RPi1 with slow SD card under I/O load), db transactions can
+    take more than hardcoded sqlite locking timeout (60 seconds), and abort
+    with error after that.
+
+  There should be no reason to run concurrent instances of the script normally,
+  with only exception being various manual checks and debug-runs,
+  using e.g. ``-P/--print-state``, ``-u/--update-host`` and such options.
 
 - Even though examples here use "nft add rule" as command examples for simplicity,
   it's generally a really bad idea to configure firewall like that - use same
@@ -382,6 +401,13 @@ Related links, tips and such trivia
 
   .. _clamping that via nftables:
     https://wiki.nftables.org/wiki-nftables/index.php/Mangling_packet_headers
+
+- While intended to work around various network disruptions, it can also be used
+  in the exact opposite way - to detect when specific web stuff is accessible
+  and block it, simply by reading "ok" result in policy-updates as undesirable
+  (instead of "na", adding blocking rules), e.g. in a pihole_-like scenario.
+
+  .. _pihole: https://pi-hole.net/
 
 - `"Dynamic policy routing to work around internet restrictions" blog post`_
   with a bit more context and info around this script.

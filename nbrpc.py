@@ -36,6 +36,7 @@ class NBRPConfig:
 
 	host_files = list()
 	db_file = pl.Path(_p.name.removesuffix('.py') + '.db')
+	db_debug, db_lock_timeout = False, 60
 	curl_cmd = 'curl'
 	curl_ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
 	policy_update_cmd = policy_replace_cmd = policy_socket = None
@@ -61,7 +62,8 @@ class NBRPConfig:
 
 
 class NBRPDB:
-	_db, _db_schema = None, '''
+	_db = _tx = None
+	_db_schema = '''
 		create table if not exists host_files (
 			path text not null primary key, mtime real not null );
 
@@ -79,9 +81,9 @@ class NBRPDB:
 		create unique index if not exists addrs_pk on addrs (host, addr);
 		create index if not exists addrs_ts_check on addrs (ts_check);'''
 
-	def __init__(self, path, lock_timeout=60, lazy=False):
+	def __init__(self, path, lock_timeout=60, lazy=False, debug=False):
 		import sqlite3
-		self._sqlite, self._ts_activity = sqlite3, 0
+		self._sqlite, self._ts_activity, self.debug = sqlite3, 0, debug
 		self._db_kws = dict( database=path,
 			isolation_level='IMMEDIATE', timeout=lock_timeout )
 		if not lazy: self._db_init()
@@ -97,19 +99,35 @@ class NBRPDB:
 
 	def _db_init(self):
 		self._db = self._sqlite.connect(**self._db_kws)
-		with self._db_cursor() as c:
+		with self() as c:
 			c.execute('pragma journal_mode=wal')
 			for stmt in self._db_schema.split(';'): c.execute(stmt)
 
 	@cl.contextmanager
-	def _db_cursor(self):
+	def __call__(self):
 		self._ts_activity = time.monotonic()
 		if not self._db: self._db_init()
-		with self._db as conn, cl.closing(conn.cursor()) as c: yield c
+		if self._tx:
+			with cl.closing(self._tx.cursor()) as c: yield c
+		else:
+			with self._db as conn, cl.closing(conn.cursor()) as c: yield c
+
+	def _upd_check(self, c, *lookup_args, rc=None):
+		rc = c.rowcount if rc is None else c.rowcount == rc
+		if self.debug and not rc: raise LookupError(*lookup_args)
+
+	@cl.contextmanager
+	def tx(self):
+		'External transaction context to group multiple ORM calls together'
+		if not self._tx: tx = self._tx = self._db.__enter__()
+		else: tx = None
+		try: yield tx
+		finally:
+			if tx: self._db.__exit__(*sys.exc_info())
 
 	_hosts_file = cs.namedtuple('Host', 'p mtime hosts')
 	def host_map_get(self):
-		with self._db_cursor() as c:
+		with self() as c:
 			c.execute( 'select path, mtime, host, chk'
 				' from host_files left join hosts on path = host_file order by path' )
 			return dict(
@@ -120,7 +138,7 @@ class NBRPDB:
 
 	def host_file_update(self, p, mtime, hosts0, hosts1):
 		p = str(p)
-		with self._db_cursor() as c:
+		with self() as c:
 			c.execute('savepoint ins')
 			try: c.execute('insert into host_files (path, mtime) values (?, ?)', (p, mtime))
 			except self._sqlite.IntegrityError:
@@ -138,7 +156,7 @@ class NBRPDB:
 
 	def host_file_cleanup(self, p_iter):
 		if not (p_set := set(map(str, p_iter))): return
-		with self._db_cursor() as c:
+		with self() as c:
 			p_set_tpl = ', '.join('?'*len(p_set))
 			c.execute(f'delete from host_files where path in ({p_set_tpl})', tuple(p_set))
 
@@ -154,7 +172,7 @@ class NBRPDB:
 
 	_host_check = cs.namedtuple('HostCheck', 't host state')
 	def host_checks(self, ts_max, n, force_host=None):
-		with self._db_cursor() as c:
+		with self() as c:
 			chk, val = ( ('ts_check <= ?', ts_max)
 				if not force_host else ('host = ?', force_host) )
 			c.execute( 'select chk, host, state from hosts'
@@ -163,8 +181,9 @@ class NBRPDB:
 				self._chk(chk).t, host, self._state_val(s) ) for chk, host, s in c.fetchall())
 
 	def host_update(self, ts, host, addrs=list(), addr_timeout=None, addr_limit=None):
-		with self._db_cursor() as c:
+		with self() as c:
 			c.execute('update hosts set ts_check = ? where host = ?', (ts, host))
+			self._upd_check(c, host)
 
 			for addr in set(ip.ip_address(addr) for addr in addrs):
 				addr = addr.compressed
@@ -173,7 +192,7 @@ class NBRPDB:
 				if not c.lastrowid:
 					c.execute( 'update addrs set ts_seen = ? where'
 						' host = ? and addr = ?', (ts, host, addr) )
-					if not c.rowcount: raise LookupError(host, addr)
+					self._upd_check(c, host, addr)
 
 			ts_cutoff = addr_timeout and (ts - addr_timeout)
 			if addr_limit:
@@ -186,7 +205,7 @@ class NBRPDB:
 
 	_addr_check = cs.namedtuple('AddrCheck', 't res host addr state')
 	def addr_checks(self, ts_max, n, force_host=None):
-		with self._db_cursor() as c:
+		with self() as c:
 			chk, val = ( ('addrs.ts_check <= ?', ts_max)
 				if not force_host else ('host = ?', force_host) )
 			c.execute( 'select chk, host, addr, addrs.state'
@@ -197,7 +216,7 @@ class NBRPDB:
 				for chk, host, addr, s in c.fetchall() )
 
 	def addr_update(self, ts, host, addr, state0, state1):
-		with self._db_cursor() as c:
+		with self() as c:
 			if state0 == state1: upd, upd_args = '', list()
 			else:
 				upd = ', state = ?, ts_update = ?'
@@ -205,7 +224,7 @@ class NBRPDB:
 			addr = ip.ip_address(addr).compressed
 			c.execute( f'update addrs set ts_check = ?{upd}'
 				' where host = ? and addr = ?', (ts, *upd_args, host, addr) )
-			if not c.rowcount: raise LookupError(host, addr)
+			self._upd_check(c, host, addr)
 
 	_addr_policy_upd = cs.namedtuple('AddrPolicyUpd', 't host state0 state addrs')
 	def host_state_sync(self, ts, td_ok, td_na, host_iter):
@@ -216,7 +235,7 @@ class NBRPDB:
 		# Outside of db, "failing" state translates to True, same as "ok".
 		changes, ts_ok_max, ts_na_max = list(), ts - td_ok, ts - td_na
 		hs_failing, hs_rec = list(), list()
-		with self._db_cursor() as c:
+		with self() as c:
 			hs_tpl = ', '.join('?'*len(hs := set(host_iter)))
 			c.execute(
 				'select host, chk, addr, hosts.ts_update, hosts.state, addrs.state'
@@ -250,13 +269,13 @@ class NBRPDB:
 				hs_tpl = ', '.join('?'*len(hs))
 				c.execute( 'update hosts set state = ?,'
 					f' ts_update = ? where host in ({hs_tpl})', (st, ts, *hs) )
-				if c.rowcount != len(hs): raise LookupError(stk, hs)
+				self._upd_check(c, stk, hs, rc=len(hs))
 		return changes
 
 	_addr_policy = cs.namedtuple( 'AddrPolicy',
 		't host state state_ts addr addr_st addr_st_ts' )
 	def host_state_policy(self, st_raw=False):
-		with self._db_cursor() as c:
+		with self() as c:
 			c.execute(
 				'select host, chk, hosts.state,'
 					' hosts.ts_update, addr, addrs.state, addrs.ts_update'
@@ -277,7 +296,8 @@ class NBRPC:
 	def close(self):
 		if self.db: self.db = self.db.close()
 	def __enter__(self):
-		self.db = NBRPDB(self.conf.db_file)
+		self.db = NBRPDB( self.conf.db_file,
+			lock_timeout=self.conf.db_lock_timeout, debug=self.conf.db_debug )
 		self.host_map = None
 		return self
 	def __exit__(self, *err): self.close()
@@ -337,11 +357,12 @@ class NBRPC:
 
 	def print_checks(self, line_len=110, line_len_diff=-16):
 		with cl.suppress(OSError): line_len = os.get_terminal_size().columns + line_len_diff
+		st_map = {None: '???', 'ok': 'OK', 'na': 'blocked', 'failing': '-failing-'}
 		for host, addrs in sorted( ( (host, list(addrs)) for host, addrs in
 					it.groupby(self.db.host_state_policy(st_raw=True), key=op.attrgetter('host')) ),
 				key=lambda host_addrs: host_addrs[0][::-1] ):
 			for n, st in enumerate(addrs):
-				if not n: print(f'\n{st.host} [{st.t} {st.state or "???"} @ {ts_fmt(st.state_ts)}]:')
+				if not n: print(f'\n{st.host} [{st.t} {st_map[st.state]} @ {ts_fmt(st.state_ts)}]:')
 				line = f'  {st.addr} :: [{ts_fmt(st.addr_st_ts)}] {st.addr_st or "???"}'
 				if len(line) > line_len: line = line[:line_len-3] + '...'
 				print(line)
@@ -424,10 +445,10 @@ class NBRPC:
 		state_changes = self.db.host_state_sync(
 			ts, td_ok, td_na, (chk.host for chk in host_checks) )
 		if state_changes:
-			host_state_str = {None: '???', True: 'OK', False: 'blocked'}
+			st_map = {None: '???', True: 'OK', False: 'blocked'}
 			for apu in state_changes:
 				self.log.info( 'Host state updated: {} = {} -> {}',
-					apu.host, host_state_str[apu.state0], host_state_str[apu.state] )
+					apu.host, st_map[apu.state0], st_map[apu.state] )
 			self.policy_update(state_changes)
 		return bool(state_changes)
 
@@ -670,7 +691,9 @@ def main(args=None, conf=None):
 		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
 	group.add_argument('-q', '--quiet', action='store_true',
 		help='Do not log info about updates that normally happen, only bugs and anomalies.')
-	group.add_argument('--debug', action='store_true', help='Verbose operation mode.')
+	group.add_argument('--debug', action='store_true', help=dd('''
+		Enables verbose logging and some extra db sanity-checks,
+			which can normally fail on race conditions with concurrent db access.'''))
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -695,6 +718,7 @@ def main(args=None, conf=None):
 			except: parser.error(f'Failed to parse {opt} value: {kv!r}')
 	for k in 'update', 'replace':
 		if v := (getattr(opts, ck := f'policy_{k}_cmd') or '').strip(): setattr(conf, ck, v.split())
+	if opts.debug: conf.db_debug = True
 
 	log.debug('Initializing nbrpc...')
 	for sig in signal.SIGINT, signal.SIGTERM:
