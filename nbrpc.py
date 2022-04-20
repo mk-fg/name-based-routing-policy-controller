@@ -63,23 +63,25 @@ class NBRPConfig:
 
 class NBRPDB:
 	_db = _tx = None
-	_db_schema = '''
-		create table if not exists host_files (
-			path text not null primary key, mtime real not null );
+	_db_schema = [ # initial schema + migrations, tracked via pragma user_version
+		'''create table if not exists host_files (
+				path text not null primary key, mtime real not null );
 
-		create table if not exists hosts (
-			host_file references host_files on delete cascade,
-			host text not null primary key,
-			chk text not null default 'https',
-			state text, ts_check real not null default 0, ts_update real not null default 0 );
-		create index if not exists hosts_ts_check on hosts (ts_check);
+			create table if not exists hosts (
+				host_file references host_files on delete cascade,
+				host text not null primary key, chk text not null default 'https',
+				state text, ts_check real not null default 0, ts_update real not null default 0 );
+			create index if not exists hosts_ts_check on hosts (ts_check);
 
-		create table if not exists addrs (
-			host references hosts on delete cascade,
-			addr text not null, state text, ts_seen real not null,
-			ts_check real not null default 0, ts_update real not null default 0 );
-		create unique index if not exists addrs_pk on addrs (host, addr);
-		create index if not exists addrs_ts_check on addrs (ts_check);'''
+			create table if not exists addrs (
+				host references hosts on delete cascade,
+				addr text not null, state text, ts_seen real not null,
+				ts_check real not null default 0, ts_update real not null default 0 );
+			create unique index if not exists addrs_pk on addrs (host, addr);
+			create index if not exists addrs_ts_check on addrs (ts_check);''',
+
+		'''alter table addrs add column ts_check_failing real not null default 0;
+			create index if not exists addrs_ts_check_failing on addrs (ts_check_failing);''' ]
 
 	def __init__(self, path, lock_timeout=60, lazy=False, debug=False):
 		import sqlite3
@@ -101,7 +103,13 @@ class NBRPDB:
 		self._db = self._sqlite.connect(**self._db_kws)
 		with self() as c:
 			c.execute('pragma journal_mode=wal')
-			for stmt in self._db_schema.split(';'): c.execute(stmt)
+			c.execute('pragma user_version')
+			if (sv := c.fetchall()[0][0]) == (sv_chk := len(self._db_schema)): return
+			elif sv > sv_chk:
+				raise RuntimeError('DB schema [{sv}] newer than the script [{sv_chk}]')
+			for sv, sql in enumerate(self._db_schema[sv:], sv+1):
+				for st in sql.split(';'): c.execute(st)
+			c.execute(f'pragma user_version = {sv}')
 
 	@cl.contextmanager
 	def __call__(self):
@@ -204,13 +212,15 @@ class NBRPDB:
 					' host = ? and ts_seen < ?', (host, ts_cutoff) )
 
 	_addr_check = cs.namedtuple('AddrCheck', 't res host addr state')
-	def addr_checks(self, ts_max, n, force_host=None):
+	def addr_checks(self, ts_max, n, failing=False, force_host=None):
 		with self() as c:
-			chk, val = ( ('addrs.ts_check <= ?', ts_max)
-				if not force_host else ('host = ?', force_host) )
+			if force_host: chk, chk_vals = 'host = ?', [force_host]
+			elif failing: chk, chk_vals = 'ts_check_failing <= ?', [ts_max]
+			else: chk, chk_vals = 'addrs.ts_check <= ?', [ts_max]
+			if failing: chk += ' and hosts.state = ?'; chk_vals.append('failing')
 			c.execute( 'select chk, host, addr, addrs.state'
 				f' from addrs join hosts using (host) where {chk}'
-				' order by addrs.ts_check limit ?', (val, n) )
+				' order by addrs.ts_check limit ?', (*chk_vals, n) )
 			return list(self._addr_check(
 					*self._chk(chk), host, ip.ip_address(addr), self._state_val(s) )
 				for chk, host, addr, s in c.fetchall() )
@@ -225,6 +235,16 @@ class NBRPDB:
 			c.execute( f'update addrs set ts_check = ?{upd}'
 				' where host = ? and addr = ?', (ts, *upd_args, host, addr) )
 			self._upd_check(c, host, addr)
+
+	def addr_update_failing(self, ts, ac, ad):
+		with self() as c:
+			for bump, ast in enumerate([ac.difference(ad), ad]):
+				if not ast: continue
+				ast = list(ip.ip_address(addr).compressed for addr in ast)
+				chk, val = ('ts_update = ?,', [ts]) if not bump else ('', [])
+				c.execute( f'update addrs set {chk} ts_check = ?'
+					f' where addr in ({", ".join("?"*len(ast))})', (*val, ts, *ast) )
+				self._upd_check(c, ast, rc=len(ast))
 
 	_addr_policy_upd = cs.namedtuple('AddrPolicyUpd', 't host state0 state addrs')
 	def host_state_sync(self, ts, td_ok, td_na, host_iter):
@@ -368,6 +388,7 @@ class NBRPC:
 				print(line)
 		print()
 
+
 	def run(self):
 		c, tsm_checks = self.conf, time.monotonic()
 		while True:
@@ -418,19 +439,18 @@ class NBRPC:
 				' update [{td}]: {}', ' '.join(chk.host for chk in host_checks) )
 
 		## Check address availability
-		# XXX: check it through the other route as well, e.g. from diff same-db instance
 		addr_checks = self.db.addr_checks(
 			(ts - self.conf.td_addr_state) if not force_n else ts,
-			force_n or self.conf.limit_iter_addrs, force_host )
+			force_n or self.conf.limit_iter_addrs, force_host=force_host )
 		if addr_checks:
 			self.log_td('addrs')
 			checks_str = ' '.join(chk.addr.compressed for chk in addr_checks)
 			if len(checks_str) > 80: checks_str = f'[{len(addr_checks):,d}] {checks_str[:70]}...'
 			self.log.debug('Running address checks: {}', checks_str)
 			res = self.run_addr_checks(addr_checks)
-			n_fail = len(addr_checks) - (n_ok := sum((r is True) for r in res.values()))
-			self.log_td( 'addrs', 'Finished host-addrs'
-				' check [ok={} fail={} {td}]: {}', n_ok, n_fail, checks_str )
+			n_fail = len(res) - (n_ok := sum((r is True) for r in res.values()))
+			self.log_td( 'addrs', 'Finished host-addrs check [ok={} fail={}'
+				' nc={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
 			for chk in addr_checks:
 				res_str = res.get(chk.addr) or 'skip-fail'
 				if res_str is True: res_str = 'OK'
@@ -451,6 +471,47 @@ class NBRPC:
 					apu.host, st_map[apu.state0], st_map[apu.state] )
 			self.policy_update(state_changes)
 		return bool(state_changes)
+
+
+	def run_failing(self):
+		c, tsm_checks = self.conf, time.monotonic()
+		while True:
+			if not (force_n := c.update_n):
+				force_n, c.update_all = c.update_all and 2**32, False
+			self.run_failing_checks( time.time(),
+				force_n=force_n, force_host=c.update_host )
+			if c.update_host or c.update_n: break
+			tsm = time.monotonic()
+			while tsm_checks <= tsm: tsm_checks += c.td_checks
+			delay = tsm_checks - tsm
+			self.log.debug('Delay until next failing-rechecks: {:,.1f}', delay)
+			self.sleep(delay)
+
+	def run_failing_checks(self, ts, force_n=None, force_host=None):
+		if force_host: force_n = 2**32
+		addr_checks = self.db.addr_checks(
+			(ts - self.conf.td_addr_state) if not force_n else ts,
+			force_n or self.conf.limit_iter_addrs, failing=True, force_host=force_host )
+		if not addr_checks: return
+
+		self.log_td('addrs')
+		checks_str = ' '.join(chk.addr.compressed for chk in addr_checks)
+		if len(checks_str) > 80: checks_str = f'[{len(addr_checks):,d}] {checks_str[:70]}...'
+		self.log.debug('Running failing addr-checks: {}', checks_str)
+
+		res = self.run_addr_checks(addr_checks)
+		n_fail = len(res) - (n_ok := sum((r is True) for r in res.values()))
+		self.log_td( 'addrs', 'Finished failing host-addrs check [confirmed={}'
+			' down={} nc={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
+		addrs_down = set(addr for addr, r in res.items() if r is not True)
+		addrs_chk = set(chk.addr for chk in addr_checks)
+
+		if addrs_down:
+			checks_str = ' '.join(addr.compressed for addr in addrs_down)
+			if len(checks_str) > 80: checks_str = f'[{len(addrs_down):,d}] {checks_str[:70]}...'
+			self.log.debug('Confirmed-down host-addrs: {}', checks_str)
+		self.db.addr_update_failing(ts, addrs_chk, addrs_down)
+
 
 	def run_addr_checks(self, addr_checks):
 		addr_checks_curl, addr_checks_res = dict(), dict()
@@ -631,7 +692,9 @@ def main(args=None, conf=None):
 			Specs can be separated by spaces or newlines.
 			Anything from # characters to newline is considered a comment and ignored.
 			Can be missing and/or created/updated on-the-fly,
-				with changes picked-up after occasional file mtime checks.'''))
+				with changes picked-up after occasional file mtime checks.
+			Has to be specified in a normal operation mode, not needed for
+				-P/--print-state, -F/--failing-checks and other modes that don't run normal checks.'''))
 	parser.add_argument('-d', '--db', metavar='path', default=conf.db_file.name,
 		help='Path to sqlite database used to track host states. Default: %(default)s')
 	parser.add_argument('-U', '--update-all', action='store_true',
@@ -640,6 +703,17 @@ def main(args=None, conf=None):
 		action='store_true', help='Issue full policy replace on script startup.')
 	parser.add_argument('-P', '--print-state', action='store_true',
 		help='Print current state of all host and address checks from db and exit.')
+	parser.add_argument('-F', '--failing-checks', action='store_true', help=dd('''
+		Special mode that only bumps grace period for ok -> failing -> n/a
+			state transition for endpoints if check for that endpoint fails in this instance.
+		Script in this mode is intended to be run through separate network connection,
+			preventing endpoint from transitioning into "n/a" state if it appears to be down
+			through that additional network perspective as well, e.g. due to global service outage.
+		Only re-checks endpoints that are in a "failing" state,
+			so requires main script instance to create/mark such in the db.
+		Limit/interval/timeout opts that apply to main loop and checks are used here as well,
+			e.g. "checks" interval between db checks, "addr-state" between per-addr checks, etc.
+		Does not need/use -f/--check-list-file option.'''))
 
 	group = parser.add_argument_group('Check/update scheduling options')
 	group.add_argument('-i', '--interval',
@@ -704,7 +778,8 @@ def main(args=None, conf=None):
 	log = get_logger()
 
 	conf.host_files = list(pl.Path(p) for p in opts.check_list_file)
-	if not (conf.host_files or opts.print_state): parser.error('No check-list files specified')
+	if not (conf.host_files or opts.print_state or opts.failing_checks):
+		parser.error('No check-list files specified')
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
 	conf.update_all, conf.update_sync = opts.update_all, opts.sync_on_start
 	conf.update_host, conf.update_n = opts.update_host, opts.force_n_checks
@@ -729,7 +804,7 @@ def main(args=None, conf=None):
 		signal.signal(signal.SIGQUIT, lambda sig,frm: None)
 		signal.signal(signal.SIGHUP, lambda sig,frm: setattr(conf, 'update_sync', True))
 		log.debug('Starting nbrpc main loop...')
-		nbrpc.run()
+		(nbrpc.run if not opts.failing_checks else nbrpc.run_failing)()
 		log.debug('Finished')
 
 if __name__ == '__main__': sys.exit(main())

@@ -6,8 +6,8 @@ After=network-online.target nbrpc-nft.service
 Type=exec
 User=nbrpc
 WorkingDirectory=/srv/nbrpc
-ExecStart=nbrpc -f hosts.txt -Ssx nft/policy.sock
 ExecReload=kill -HUP $MAINPID
+ExecStart=nbrpc -f hosts.txt -Ssx nft/policy.sock
 ExecStartPre=+setup-net-tunnels
 
 ReadWritePaths=/srv/nbrpc

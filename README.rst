@@ -92,9 +92,7 @@ Some less-obvious quirks of availability-checking done by the script are listed 
 
   This is done so that this tool doesn't just track general upstream up/down
   status, but only marks things as needing a workaround when it legitimately
-  works, unlike direct connection.
-
-  TODO: not implemented yet, only direct checks are made
+  works that way, unlike direct connection.
 
 - State of the host only changes after a grace period, to avoid flapping between
   routes needlessly during whatever temporary issues, like maybe service being down
@@ -143,6 +141,18 @@ to run with systemd, though make sure to tweak Exec-lines and any other paths
 in there first.
 
 ``-P/--print-state`` can be used to check on all host and address states anytime.
+
+Once that works, additional instance of the script can be added to run in
+mostly same way, but with following two diffs:
+
+- ``-F/--failing-checks`` option added, and maybe interval tweaks.
+- Firewall/routing setup to send all traffic of that second instance through
+  whatever workaround route/tunnel that is supposed to be used.
+
+See info on that option for more details, but gist is that running such instance
+can help to detect prolonged global service outages and avoid marking hosts as
+blocked if they just don't work anywhere due to that.
+"host-na-state" grace-interval should prevent changing state on brief outages without this.
 
 Also see below for an extended OS routing integration example.
 
@@ -303,6 +313,10 @@ General steps for this kind of setup:
 
   Firewall rules should probably be in nftables.conf file, and have a hook
   sending SIGHUP to nbrpc on reload, to have it re-populate sets there as well.
+
+  Reverse "skuid" match should be applied to script instance running with
+  ``-F/--failing-checks``, if it is used, to have all its traffic routed through
+  "vpn" table, as opposed to the main instance.
 
 - Something to handle service availability updates from main script and update
   routing policy::
