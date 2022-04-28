@@ -50,7 +50,7 @@ class NBRPConfig:
 	td_host_ok_state = 41 * 3600 # how long to wait resetting failures back to ok
 	td_host_na_state = 10 * 3600 # grace period to wait for host to maybe come back up
 
-	timeout_host_addr = 4 * 24 * 3600 # to "forget" addrs that weren't seen in a while
+	timeout_host_addr = 12 * 24 * 3600 # to "forget" addrs that weren't seen in a while
 	timeout_addr_check = 30.0 # for http and socket checks
 	timeout_log_td_info = 90.0 # switches slow log_td ops to log.info instead of debug
 	timeout_kill = 8.0 # between SIGTERM and SIGKILL
@@ -58,7 +58,7 @@ class NBRPConfig:
 
 	limit_iter_hosts = 9 # max hosts to getaddrinfo() on one iteration
 	limit_iter_addrs = 32 # limit on addrs to check in one iteration
-	limit_addrs_per_host = 12 # max last-seen IPs to track for each hostname
+	limit_addrs_per_host = 18 # max last-seen IPs to track for each hostname
 
 
 class NBRPDB:
