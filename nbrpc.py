@@ -388,6 +388,16 @@ class NBRPC:
 				print(line)
 		print()
 
+	def print_unbound_zone(self, re_host):
+		re_host = re.compile(re_host)
+		for host, addrs in it.groupby(
+				self.db.host_state_policy(), key=op.attrgetter('host') ):
+			if not re_host.search(host): continue
+			for n, st in enumerate(addrs):
+				if not n: print(f'\nlocal-zone: {st.host}. static')
+				rt = ['A', 'AAAA'][':' in st.addr]
+				print(f"local-data: '{st.host} {rt} {st.addr}'")
+
 
 	def run(self):
 		c, tsm_checks = self.conf, time.monotonic()
@@ -701,9 +711,17 @@ def main(args=None, conf=None):
 		help='Force-update all host addresses and availability statuses on start.')
 	parser.add_argument('-S', '--sync-on-start',
 		action='store_true', help='Issue full policy replace on script startup.')
-	parser.add_argument('-P', '--print-state', action='store_true',
+
+	group = parser.add_argument_group('Different/oneshot operation modes')
+	group.add_argument('-P', '--print-state', action='store_true',
 		help='Print current state of all host and address checks from db and exit.')
-	parser.add_argument('-F', '--failing-checks', action='store_true', help=dd('''
+	group.add_argument('-u', '--update-host', metavar='host', help=dd('''
+		Force check/update specified host status and exit.
+		This runs hostname check, all of relevant address
+			checks and force-updates availability status from those,
+			regardless of any grace period(s) and timeouts for this host.
+		Can be combined with -S/--sync-on-start to force-replace policy before exit.'''))
+	group.add_argument('-F', '--failing-checks', action='store_true', help=dd('''
 		Special mode that only bumps grace period for ok -> failing -> n/a
 			state transition for endpoints if check for that endpoint fails in this instance.
 		Script in this mode is intended to be run through separate network connection,
@@ -714,6 +732,17 @@ def main(args=None, conf=None):
 		Limit/interval/timeout opts that apply to main loop and checks are used here as well,
 			e.g. "checks" interval between db checks, "addr-state" between per-addr checks, etc.
 		Does not need/use -f/--check-list-file option.'''))
+	group.add_argument('-Z', '--unbound-zone-for', metavar='regexp', help=dd('''
+		Generate local YAML zone-file for regexp-specified hosts to stdout and exit.
+		It's intended to be included in Unbound DNS resolver config via "include:" directive.
+		Static local-zone and local-data directives there are to lock specified
+			host(s) to only use IPs from database that's been checked by this script,
+			to avoid application errors due to them resolving same name(s) to some diff ones.
+		Specified regexp (python re format) should match host(s)
+			in the database, empty output will be produced on no match.
+		Make sure this script doesn't use such restricted resolver itself.'''))
+	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
+		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
 
 	group = parser.add_argument_group('Check/update scheduling options')
 	group.add_argument('-i', '--interval',
@@ -755,14 +784,6 @@ def main(args=None, conf=None):
 		Can be used to separate/sandbox unprivileged "tester" part of the script easily.'''))
 
 	group = parser.add_argument_group('Logging and debug options')
-	group.add_argument('-u', '--update-host', metavar='host', help=dd('''
-		Force check/update specified host status and exit.
-		This runs hostname check, all of relevant address
-			checks and force-updates availability status from those,
-			regardless of any grace period(s) and timeouts for this host.
-		Can be combined with -S/--sync-on-start to force-replace policy before exit.'''))
-	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
-		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
 	group.add_argument('-q', '--quiet', action='store_true',
 		help='Do not log info about updates that normally happen, only bugs and anomalies.')
 	group.add_argument('--debug', action='store_true', help=dd('''
@@ -778,8 +799,10 @@ def main(args=None, conf=None):
 	log = get_logger()
 
 	conf.host_files = list(pl.Path(p) for p in opts.check_list_file)
-	if not (conf.host_files or opts.print_state or opts.failing_checks):
+	if not ( conf.host_files or opts.print_state
+			or opts.failing_checks or opts.unbound_zone_for ):
 		parser.error('No check-list files specified')
+
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
 	conf.update_all, conf.update_sync = opts.update_all, opts.sync_on_start
 	conf.update_host, conf.update_n = opts.update_host, opts.force_n_checks
@@ -801,6 +824,7 @@ def main(args=None, conf=None):
 			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
 	with NBRPC(conf) as nbrpc:
 		if opts.print_state: return nbrpc.print_checks()
+		if opts.unbound_zone_for: return nbrpc.print_unbound_zone(opts.unbound_zone_for)
 		signal.signal(signal.SIGQUIT, lambda sig,frm: None)
 		signal.signal(signal.SIGHUP, lambda sig,frm: setattr(conf, 'update_sync', True))
 		log.debug('Starting nbrpc main loop...')

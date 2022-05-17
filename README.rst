@@ -418,6 +418,24 @@ Related links, tips, info and trivia
   .. _clamping TCP MSS via nftables:
     https://wiki.nftables.org/wiki-nftables/index.php/Mangling_packet_headers
 
+- If some service is hopping between IPs too much, so that nbrpc can't catch-up
+  with it, and occasionally-failing connections are annoying, script has
+  ``-Z/--unbound-zone-for`` option to export local-zone with only A/AAAA records
+  known to it for regexp-filtered list of known/managed hostnames
+  (can be just ``-Z.`` to dump all of them).
+
+  Output produced there can be used with `Unbound`_'s (DNS resolver/cache
+  daemon) ``include:`` directive, or parsed as YAML_ for any other local resolver.
+  Should probably be scheduled via systemd timer
+  (with e.g. ``StandardOutput=truncate:...`` line) or crontab.
+
+  Note that same DNS resolver with zone overrides shouldn't be used for main
+  nbrpc script itself, which can be easy to fix by e.g. bind-mounting different
+  resolv.conf file (pointing to unrestricted resolver) into its systemd service/container.
+
+  .. _Unbound: https://unbound.docs.nlnetlabs.nl/
+  .. _YAML: https://en.wikipedia.org/wiki/YAML
+
 - While intended to work around various network disruptions, this stuff can also
   be used in the exact opposite way - to detect when specific endpoints are
   accessible and block them - simply by reading "ok" result in policy-updates as
