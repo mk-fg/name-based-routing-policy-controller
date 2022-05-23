@@ -312,7 +312,8 @@ General steps for this kind of setup:
   (outgoing connections from its OS/pids), not just stuff forwarded through it.
 
   Firewall rules should probably be in nftables.conf file, and have a hook
-  sending SIGHUP to nbrpc on reload, to have it re-populate sets there as well.
+  sending SIGHUP to nbrpc on reload, to have it re-populate sets there as well,
+  while "ip" routes/rules configured in whatever network manager, if any.
 
   Reverse "skuid" match should be applied to script instance running with
   ``-F/--failing-checks``, if it is used, to have all its traffic routed through
@@ -417,6 +418,13 @@ Related links, tips, info and trivia
 
   .. _clamping TCP MSS via nftables:
     https://wiki.nftables.org/wiki-nftables/index.php/Mangling_packet_headers
+
+- systemd-networkd will clobber routes and rules defined via iproute2 "ip" tools
+  from console or some script by default, at somewhat random times.
+
+  ``ManageForeignRoutingPolicyRules=no`` and ``ManageForeignRoutes=no`` options
+  in networkd.conf can be used to disable that behavior, or routes/rules defined
+  via its configuration files properly.
 
 - If some service is hopping between IPs too much, so that nbrpc can't catch-up
   with it, and occasionally-failing connections are annoying, script has
