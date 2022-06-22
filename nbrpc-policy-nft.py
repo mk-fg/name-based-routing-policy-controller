@@ -12,6 +12,7 @@ def p_nft_json(o):
 		func.n, func.pf = 1, ft.partial(pprint.pformat, width=110, compact=True)
 	print(f'[ {dt.datetime.now().isoformat(" ", "seconds")} ] -- nftables update {func.n:,d}')
 	for line in func.pf(o).splitlines(): print(f'  {line}')
+	sys.stdout.flush()
 	func.n += 1
 
 def update_iter(sock, timeout):
