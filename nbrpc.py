@@ -23,10 +23,23 @@ err_fmt = lambda err: f'[{err.__class__.__name__}] {err}'
 get_logger = lambda name='': LogStyleAdapter(
 	logging.getLogger(name and 'nbrpc' or f'nbrpc.{name}') )
 log = get_logger('TMP') # for noisy temp-debug stuff
+p_err = ft.partial(print, file=sys.stderr)
+
+def chk_parse(spec):
+	if ':' in spec: host, chk = spec.split(':', 1)
+	elif '=' in spec:
+		host, chk = spec.split('=', 1)
+		chk = f'https={chk}'
+	else: host, chk = spec, 'https'
+	return host, chk
 
 def td_fmt(td):
 	s, ms = divmod(td, 1)
 	return f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
+
+def ts_now():
+	if ts := os.environ.get('NBRPC_TEST_TS'): return float(ts) + int(1e9)
+	return time.time()
 
 ts_fmt = lambda ts: time.strftime('%Y-%m-%d.%H:%M', time.gmtime(ts))
 
@@ -40,6 +53,7 @@ class NBRPConfig:
 	curl_cmd = 'curl'
 	curl_ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
 	policy_update_cmd = policy_replace_cmd = policy_socket = None
+	fake_results = None
 
 	update_all = update_sync = False
 	update_n = update_host = None
@@ -169,9 +183,15 @@ class NBRPDB:
 			c.execute(f'delete from host_files where path in ({p_set_tpl})', tuple(p_set))
 
 	def _state_val(self, s):
+		# Used for host and addr states
+		# "skipped" is addr state for when curl can't be run
+		# "failing" is a host state, same as "ok" except for alt-route checks
 		if not s or s == 'skipped': return None
 		elif s in ['ok', 'failing']: return True
 		else: return False
+
+	def _state_val_addr(self, v): # check result -> db state for addrs
+		return {True: 'ok', False: 'na', None: 'skipped'}.get(v, v)
 
 	_check = cs.namedtuple('Chk', 't res')
 	def _chk(self, chk):
@@ -230,7 +250,7 @@ class NBRPDB:
 			if state0 == state1: upd, upd_args = '', list()
 			else:
 				upd = ', state = ?, ts_update = ?'
-				upd_args = 'ok' if state1 is True else (state1 or 'skipped'), ts
+				upd_args = self._state_val_addr(state1), ts
 			addr = ip.ip_address(addr).compressed
 			c.execute( f'update addrs set ts_check = ?{upd}'
 				' where host = ? and addr = ?', (ts, *upd_args, host, addr) )
@@ -253,8 +273,7 @@ class NBRPDB:
 		#  ok -[chk-fail]-> failing :: na -[chk-ok + td_ok]-> ok ::
 		#  failing -[chk-ok]-> ok :: failing -[chk-fail + td_na]-> na
 		# Outside of db, "failing" state translates to True, same as "ok".
-		changes, ts_ok_max, ts_na_max = list(), ts - td_ok, ts - td_na
-		hs_failing, hs_rec = list(), list()
+		changes, hs_failing, hs_rec = list(), list(), list()
 		with self() as c:
 			hs_tpl = ', '.join('?'*len(hs := set(host_iter)))
 			c.execute(
@@ -265,21 +284,22 @@ class NBRPDB:
 				addrs, sas = set(), (set(), set())
 				for host, chk, addr, ts_upd, shs, sa in host_tuples:
 					addrs.add(addr); sas[':' in addr].add(self._state_val(sa))
-				sa, sh = None, self._state_val(shs)
+				sa, sh, td_upd = None, self._state_val(shs), ts - ts_upd
 				for saf in sas:
 					saf = list(sa for sa in saf if sa is not None)
 					if not saf: continue # all-unknowns
 					if all(sa is True for sa in saf): sa = True; break # any family all-good
 					sa = False # any family not all-good = N/A state
 				if sa != sh:
-					# log.debug( 'host-upd: {} sa={} sh={}/{} ts[ upd={} ok={} na={} ]',
-					# 	host, sa, sh, shs, *map(ts_fmt, [ts_upd, ts_ok_max, ts_na_max]) )
-					if sa and ts_upd > ts_ok_max: continue
-					if not sa:
-						if ts_upd > ts_na_max: continue
-						if shs == 'ok': hs_failing.append(host); continue
+					# log.debug(
+					# 	'host-upd: {} sa={} sh={}[{}] time[ since-upd={} to-ok={} to-na={} ]',
+					# 	host, sa, sh, shs, *map(ts_fmt, [td_upd, td_ok, td_na]) )
+					if sa and td_upd < td_ok: continue # "na" host-state, all-ok on addrs, but too soon
+					if not sa and td_upd < td_na: # either in "failing" state, or ok->failing transition
+						if shs == 'ok': hs_failing.append(host)
+						continue
 					changes.append(self._addr_policy_upd(self._chk(chk).t, host, sh, sa, addrs))
-				elif sa and shs == 'failing': hs_rec.append(host)
+				elif sa and shs == 'failing': hs_rec.append(host) # failing->ok recovery
 			for stk, hs in ('failing', hs_failing), ('ok', hs_rec), (True, ...), (False, ...):
 				if hs is ...:
 					hs = set(apu.host for apu in changes if apu.state is stk)
@@ -356,15 +376,9 @@ class NBRPC:
 			except FileNotFoundError: mtime = 0
 			if abs( (hf := self.host_map.get( p,
 				self.db._hosts_file(p, 0, dict()) )).mtime - mtime ) < 0.01: continue
-			hosts = dict()
-			for spec in (list() if not mtime else it.chain.from_iterable(
-					_re_rem.sub('', line).split() for line in p.read_text().splitlines() )):
-				if ':' in spec: host, chk = spec.split(':', 1)
-				elif '=' in spec:
-					host, chk = spec.split('=', 1)
-					chk = f'https={chk}'
-				else: host, chk = spec, 'https'
-				hosts[host] = chk
+			hosts = dict( chk_parse(spec) for spec in
+				(list() if not mtime else it.chain.from_iterable(
+					_re_rem.sub('', line).split() for line in p.read_text().splitlines() )) )
 			self.db.host_file_update(p, mtime, hf.hosts, hosts)
 			self.host_map[p] = self.db._hosts_file(p, mtime, hosts)
 			if hf.hosts != hosts:
@@ -406,7 +420,7 @@ class NBRPC:
 
 			if not (force_n := c.update_n):
 				force_n, c.update_all = c.update_all and 2**32, False
-			changes = self.run_checks( time.time(),
+			changes = self.run_checks( ts_now(),
 				force_n=force_n, force_host=c.update_host )
 			force_sync, c.update_sync = c.update_sync, False
 			if changes or force_sync: self.policy_replace()
@@ -429,19 +443,22 @@ class NBRPC:
 		for chk in host_checks:
 			if (svc := chk.t).startswith('tcp-'): svc = int(svc[4:])
 			elif svc not in ['http', 'https']: raise ValueError(svc)
-			self.log_td('gai')
-			try:
-				addrs = set(filter( op.attrgetter('is_global'),
-					(ip.ip_address(ai[4][0]) for ai in socket.getaddrinfo(
-						chk.host, svc, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP )) ))
-				if not addrs: raise OSError('No valid address results')
-			except OSError as err:
-				addrs = list()
-				self.log_td( 'gai', 'Host getaddrinfo: {} {}'
-					' [{td}] - {}', chk.host, chk.t, err_fmt(err) )
+			if self.conf.fake_results:
+				addrs = list(r.addr for r in self.conf.fake_results.get(chk.host))
 			else:
-				self.log_td( 'gai', 'Host getaddrinfo: {} {}'
-					' [addrs={} {td}]', chk.host, chk.t, len(addrs) )
+				self.log_td('gai')
+				try:
+					addrs = set(filter( op.attrgetter('is_global'),
+						(ip.ip_address(ai[4][0]) for ai in socket.getaddrinfo(
+							chk.host, svc, type=socket.SOCK_STREAM, proto=socket.IPPROTO_TCP )) ))
+					if not addrs: raise OSError('No valid address results')
+				except OSError as err:
+					addrs = list()
+					self.log_td( 'gai', 'Host getaddrinfo: {} {}'
+						' [{td}] - {}', chk.host, chk.t, err_fmt(err) )
+				else:
+					self.log_td( 'gai', 'Host getaddrinfo: {} {}'
+						' [addrs={} {td}]', chk.host, chk.t, len(addrs) )
 			self.db.host_update( ts, chk.host, addrs,
 				addr_timeout=self.conf.timeout_host_addr, addr_limit=self.conf.limit_addrs_per_host )
 		if host_checks:
@@ -460,12 +477,11 @@ class NBRPC:
 			res = self.run_addr_checks(addr_checks)
 			n_fail = len(res) - (n_ok := sum((r is True) for r in res.values()))
 			self.log_td( 'addrs', 'Finished host-addrs check [ok={} fail={}'
-				' nc={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
+				' skip={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
 			for chk in addr_checks:
-				res_str = res.get(chk.addr) or 'skip-fail'
-				if res_str is True: res_str = 'OK'
-				self.log.debug( 'Host-addr check:'
-					' {} [{} {}] - {}', chk.addr.compressed, chk.t, chk.host, res_str )
+				res_str = self.db._state_val_addr(res.get(chk.addr))
+				self.log.debug( 'Host-addr check: {} [{} {}] - {}',
+					chk.addr.compressed, chk.t, chk.host, res_str )
 			for chk in addr_checks:
 				self.db.addr_update(ts, chk.host, chk.addr, chk.state, res.get(chk.addr))
 
@@ -488,7 +504,7 @@ class NBRPC:
 		while True:
 			if not (force_n := c.update_n):
 				force_n, c.update_all = c.update_all and 2**32, False
-			self.run_failing_checks( time.time(),
+			self.run_failing_checks( ts_now(),
 				force_n=force_n, force_host=c.update_host )
 			if c.update_host or c.update_n: break
 			tsm = time.monotonic()
@@ -531,6 +547,15 @@ class NBRPC:
 			else: self.log.warning('Skipping not-implemented check type: {}', chk.t)
 		if not addr_checks_curl: return addr_checks_res
 
+		curl_res_default = '200/301/302'
+		if self.conf.fake_results:
+			for chk in addr_checks_curl.values():
+				if not (r := self.conf.fake_results.get(chk.addr)): continue
+				addr_checks_res[r.addr] = any(
+					(not r.chk or (int(n.strip() or -1) == int(r.chk)))
+					for n in (chk.res or curl_res_default).split('/') )
+			return addr_checks_res
+
 		curl_ports = dict(http=80, https=443)
 		curl_to, curl_fmt = self.conf.timeout_addr_check, (
 			'%{urlnum} %{response_code} %{time_total}'
@@ -539,7 +564,6 @@ class NBRPC:
 			[ self.conf.curl_cmd, '--disable', '--config', '-',
 				'--parallel', '--parallel-immediate', '--max-time', str(curl_to) ],
 			stdin=sp.PIPE, stdout=sp.PIPE )
-		curl_res_default = '200/301/302'
 
 		def curl_term(sig=None, frm=None):
 			nonlocal curl
@@ -612,6 +636,7 @@ class NBRPC:
 		policy = policy_func()
 		self.log_td('pu')
 		if not self.conf.policy_socket:
+			if p == ['-']: return print(policy.decode().rstrip())
 			try:
 				sp.run( p, check=True,
 					timeout=self.conf.timeout_policy_cmd, input=policy )
@@ -771,6 +796,7 @@ def main(args=None, conf=None):
 			"na" is for unavailable services that should be routed through the tunnel or whatever.
 		If command includes spaces, then it will be split into binary/arguments on those.
 		Script is expected to exit with 0 code, otherwise error will be logged.
+		Command can be "-" to simply print policy lines to stdout, for testing.
 		These lines indicate latest policy updates, not the full state of it,
 			for which there's -x/--policy-replace-cmd option, that should be more reliable.'''))
 	group.add_argument('-x', '--policy-replace-cmd', metavar='command', help=dd('''
@@ -792,7 +818,7 @@ def main(args=None, conf=None):
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
-	if opts.debug: log = logging.DEBUG
+	if opts.debug and not opts.print_state: log = logging.DEBUG
 	elif opts.quiet: log = logging.WARNING
 	else: log = logging.INFO
 	logging.basicConfig(format='%(levelname)s :: %(message)s', level=log)
@@ -818,6 +844,17 @@ def main(args=None, conf=None):
 		if v := (getattr(opts, ck := f'policy_{k}_cmd') or '').strip(): setattr(conf, ck, v.split())
 	if opts.debug: conf.db_debug = True
 
+	if results_file := os.environ.get('NBRPC_TEST_RUN'):
+		_res_line = cs.namedtuple('Result', 'host addr chk')
+		results = conf.fake_results = cs.defaultdict(list)
+		for res in pl.Path(results_file).read_text().split():
+			if '=' not in res: host, res = res, None
+			else: host, res = res.split('=', 1)
+			if '@' in host: host, addr = host.split('@', 1)
+			else: host, addr = '', host
+			res = results[res.addr] = _res_line(host, ip.ip_address(addr), res)
+			results[res.host].append(res)
+
 	log.debug('Initializing nbrpc...')
 	for sig in signal.SIGINT, signal.SIGTERM:
 		signal.signal( sig, lambda sig,frm:
@@ -829,6 +866,6 @@ def main(args=None, conf=None):
 		signal.signal(signal.SIGHUP, lambda sig,frm: setattr(conf, 'update_sync', True))
 		log.debug('Starting nbrpc main loop...')
 		(nbrpc.run if not opts.failing_checks else nbrpc.run_failing)()
-		log.debug('Finished')
+	log.debug('Finished')
 
 if __name__ == '__main__': sys.exit(main())
