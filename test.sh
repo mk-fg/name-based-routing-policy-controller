@@ -21,7 +21,7 @@ set -eEo pipefail
 err=1; db_dump() { :; }; policy_dump() { :; }
 tmpdir=${XDG_RUNTIME_DIR:-/tmp}
 tmpdir=$(mktemp -d "$tmpdir"/.nbrpc-test.XXXXXX)
-trap "db_dump; policy_dump; rm -rf '$tmpdir'; trap '' TERM; kill 0; wait; exit $err" EXIT
+trap 'db_dump; policy_dump; rm -rf "$tmpdir"; trap "" TERM; kill 0; wait; exit $err' EXIT
 trap 'echo "FAILURE at line $LINENO (ts=$ts): $BASH_COMMAND"' ERR
 mkdir -p "$tmpdir"
 
@@ -29,17 +29,21 @@ chks="$tmpdir"/checks.txt
 db="$tmpdir"/checks.db
 run="$tmpdir"/run.txt
 
-cat >"$chks" <<EOF
-test
-EOF
+# ## Online check to see URL parsing/outputs, uncomment for one-off manual test
+# echo >"$chks" httpbin.org:https/status/473=473
+# ./nbrpc.py -f "$chks" -d "$db" -SUn9999 -x- --debug
+# ./nbrpc.py -f "$chks" -d "$db" -P
+# exit
+
+echo >"$chks" test
 
 export NBRPC_TEST_RUN="$run"
 ts=0 ts_sec=0 # used in error msgs, to id exact failing test
 test_run_cmd=(
 	./nbrpc.py -f "$chks" -d "$db"
-	-i "host-na-state=500" # grace period for na->ok transition
-	-i "host-ok-state=1000" # same for ok->na
-	-t "host-addr=5000" # to forget not-seen dns addr
+	-i host-na-state=500 # <10min, grace period for na->ok transition
+	-i host-ok-state=1000 # <20min, same for ok->na
+	-t host-addr=5000 # <100min, to forget not-seen dns addr
 	-SUn9999 -x- "${opts[@]}" ) # -n disables other intervals
 test_run() {
 	[[ -z "$1" ]] || ts=$1
@@ -178,13 +182,24 @@ na test 0.0.0.1 https
 na test 0.0.0.3 https
 EOF
 diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.03:48]:
+  0.0.0.1 :: [2001-09-09.02:38] ok
+  0.0.0.3 :: [2001-09-09.03:48] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
 test_run 140
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 EOF
 diff -u "$tmpdir"/out{.expected,}.txt
-
-
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.04:09]:
+  0.0.0.1 :: [2001-09-09.02:38] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
 
 
 ### Finished

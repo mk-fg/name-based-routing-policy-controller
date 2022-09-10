@@ -25,14 +25,6 @@ get_logger = lambda name='': LogStyleAdapter(
 log = get_logger('TMP') # for noisy temp-debug stuff
 p_err = ft.partial(print, file=sys.stderr)
 
-def chk_parse(spec):
-	if ':' in spec: host, chk = spec.split(':', 1)
-	elif '=' in spec:
-		host, chk = spec.split('=', 1)
-		chk = f'https={chk}'
-	else: host, chk = spec, 'https'
-	return host, chk
-
 def td_fmt(td):
 	s, ms = divmod(td, 1)
 	return f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
@@ -195,8 +187,10 @@ class NBRPDB:
 
 	_check = cs.namedtuple('Chk', 't res')
 	def _chk(self, chk):
-		if '=' in chk: return self._check(*chk.split('=', 1))
-		return self._check(chk, None)
+		chk = chk.replace('==', '\ue578')
+		if '=' in chk: chk, res = chk.split('=', 1)
+		else: res = None
+		return self._check(chk.replace('\ue578', '='), res)
 
 	_host_check = cs.namedtuple('HostCheck', 't host state')
 	def host_checks(self, ts_max, n, force_host=None):
@@ -362,6 +356,22 @@ class NBRPC:
 			self.log.debug( 'Interrupted sleep-delay'
 				' on signal: {}', signal.Signals(sig_info.si_signo).name )
 
+	def chk_parse(self, spec): # host:chk -> host, chk
+		if ':' in spec: host, chk = spec.split(':', 1)
+		elif '=' in spec:
+			host, chk = spec.split('=', 1)
+			chk = f'https={chk}'
+		else: host, chk = spec, 'https'
+		return host, chk
+
+	def chk_http(self, spec): # http/url -> http, /url
+		if not (m := re.search(r'^(https?)(/.*)?$', spec)): return
+		return m.groups()
+
+	def chk_type(self, spec): # http/... -> http for policy output
+		if m := self.chk_http(spec): return m[0]
+		else: return spec
+
 	def host_map_sync(self, _re_rem=re.compile('#.*')):
 		if self.host_map is None: self.host_map = self.db.host_map_get()
 		host_files = list(pl.Path(os.path.abspath(p)) for p in self.conf.host_files)
@@ -376,8 +386,8 @@ class NBRPC:
 			except FileNotFoundError: mtime = 0
 			if abs( (hf := self.host_map.get( p,
 				self.db._hosts_file(p, 0, dict()) )).mtime - mtime ) < 0.01: continue
-			hosts = dict( chk_parse(spec) for spec in
-				(list() if not mtime else it.chain.from_iterable(
+			hosts = dict( self.chk_parse(spec)
+				for spec in (list() if not mtime else it.chain.from_iterable(
 					_re_rem.sub('', line).split() for line in p.read_text().splitlines() )) )
 			self.db.host_file_update(p, mtime, hf.hosts, hosts)
 			self.host_map[p] = self.db._hosts_file(p, mtime, hosts)
@@ -396,7 +406,9 @@ class NBRPC:
 					it.groupby(self.db.host_state_policy(st_raw=True), key=op.attrgetter('host')) ),
 				key=lambda host_addrs: host_addrs[0][::-1] ):
 			for n, st in enumerate(addrs):
-				if not n: print(f'\n{st.host} [{st.t} {st_map[st.state]} @ {ts_fmt(st.state_ts)}]:')
+				if not n:
+					print( f'\n{st.host} [{self.chk_type(st.t)}'
+						f' {st_map[st.state]} @ {ts_fmt(st.state_ts)}]:' )
 				line = f'  {st.addr} :: [{ts_fmt(st.addr_st_ts)}] {st.addr_st or "???"}'
 				if len(line) > line_len: line = line[:line_len-3] + '...'
 				print(line)
@@ -442,7 +454,8 @@ class NBRPC:
 		self.log_td('hosts')
 		for chk in host_checks:
 			if (svc := chk.t).startswith('tcp-'): svc = int(svc[4:])
-			elif svc not in ['http', 'https']: raise ValueError(svc)
+			elif m := self.chk_http(svc): svc, up = m
+			else: raise ValueError(f'Unrecognized check type: {svc}')
 			if self.conf.fake_results:
 				addrs = list(r.addr for r in self.conf.fake_results.get(chk.host))
 			else:
@@ -455,10 +468,10 @@ class NBRPC:
 				except OSError as err:
 					addrs = list()
 					self.log_td( 'gai', 'Host getaddrinfo: {} {}'
-						' [{td}] - {}', chk.host, chk.t, err_fmt(err) )
+						' [{td}] - {}', chk.host, svc, err_fmt(err) )
 				else:
 					self.log_td( 'gai', 'Host getaddrinfo: {} {}'
-						' [addrs={} {td}]', chk.host, chk.t, len(addrs) )
+						' [addrs={} {td}]', chk.host, svc, len(addrs) )
 			self.db.host_update( ts, chk.host, addrs,
 				addr_timeout=self.conf.timeout_host_addr, addr_limit=self.conf.limit_addrs_per_host )
 		if host_checks:
@@ -540,9 +553,10 @@ class NBRPC:
 
 
 	def run_addr_checks(self, addr_checks):
-		addr_checks_curl, addr_checks_res = dict(), dict()
+		addr_checks_curl, addr_checks_res, addr_http = dict(), dict(), dict()
 		for chk in addr_checks:
-			if chk.t in ['http', 'https']: addr_checks_curl[chk.addr] = chk
+			if http_info := self.chk_http(chk.t):
+				addr_checks_curl[chk.addr], addr_http[chk.addr] = chk, http_info
 			elif chk.t == 'dns': addr_checks_res[chk.addr] = True
 			else: self.log.warning('Skipping not-implemented check type: {}', chk.t)
 		if not addr_checks_curl: return addr_checks_res
@@ -586,7 +600,8 @@ class NBRPC:
 			# Can also check tls via --cacert and --pinnedpubkey <hashes>
 			res_map = dict()
 			for n, chk in enumerate(addr_checks_curl.values()):
-				proto, host, addr, port = chk.t, chk.host, chk.addr.compressed, curl_ports[chk.t]
+				proto, url = addr_http[chk.addr]
+				host, addr, port = chk.host, chk.addr.compressed, curl_ports[proto]
 				try:
 					res_map[chk.res] = set( int(n.strip() or -1)
 						for n in (chk.res or curl_res_default).split('/') )
@@ -597,7 +612,7 @@ class NBRPC:
 				if ':' in addr: addr = f'[{addr}]'
 				if n: curl.stdin.write(b'next\n')
 				curl.stdin.write('\n'.join([ '',
-					f'url = "{proto}://{host}:{port}/"',
+					f'url = "{proto}://{host}:{port}{url or "/"}"',
 					f'resolve = {host}:{port}:{addr}', # --connect-to can also be used
 					f'user-agent = "{self.conf.curl_ua}"',
 					f'connect-timeout = {curl_to}', f'max-time = {curl_to}',
@@ -662,15 +677,16 @@ class NBRPC:
 
 	def policy_update(self, state_changes):
 		self.run_policy_cmd('update', lambda: ''.join(it.chain.from_iterable(
-			(f'{apu.state and "ok" or "na"} {apu.host} {a} {apu.t}\n' for a in apu.addrs)
+			( f'{apu.state and "ok" or "na"}'
+				f' {apu.host} {a} {self.chk_type(apu.t)}\n' for a in apu.addrs )
 			for apu in state_changes )).encode() )
 
 	def policy_replace(self):
 		def policy_func():
 			policy = self.db.host_state_policy()
 			# for ap in policy: log.debug('Policy: {} {} {} = {}', ap.host, ap.addr, ap.t, ap.state)
-			return ''.join(( f'{ap.state and "ok" or "na"}'
-				f' {ap.host} {ap.addr} {ap.t}\n' ) for ap in policy).encode()
+			return ''.join(( f'{ap.state and "ok" or "na"} {ap.host}'
+				f' {ap.addr} {self.chk_type(ap.t)}\n' ) for ap in policy).encode()
 		self.run_policy_cmd('replace', policy_func)
 
 

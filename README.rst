@@ -167,7 +167,7 @@ Check list file format
 
 Should be a space/newline-separated list of hostnames to check.
 
-Each spec can be more than just hostname: ``hostname[:check-type][=expected-result]``
+Each spec can be more than just hostname: ``hostname[:check][=expected-result]``
 
 - ``hostname`` - hostname or address to use with getaddrinfo() for each check.
 
@@ -175,9 +175,13 @@ Each spec can be more than just hostname: ``hostname[:check-type][=expected-resu
   tend to change IPs, and names are required for https, SNI and proper vhost
   responses anyway.
 
-- ``check-type`` - type of check to run.
+- ``check`` - type of check to run.
 
   Currently supported checks: ``https``, ``http``, ``dns``. Default: ``https``.
+
+  http/https checks can also have a pre-encoded URL path included, e.g.
+  ``https/url/path...``, to query that for more useful response status code.
+  If there's ``=`` in URL path, replace/escape it with ``==``.
 
 - ``expected-result`` - for http(s) checks - response code(s) to treat as an OK result,
   with anything else considered a failure, separated by slash ("/"). Default is 200/301/302.
