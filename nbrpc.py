@@ -27,7 +27,9 @@ p_err = ft.partial(print, file=sys.stderr)
 
 def td_fmt(td):
 	s, ms = divmod(td, 1)
-	return f'{s//60:02,.0f}:{s%60:02.0f}.{ms*100:02.0f}'
+	v = f'{s//60:02,.0f}:{s%60:02.0f}'
+	if s < 10 and ms > 0.001: v += f'.{ms*100:02.0f}'
+	return v
 
 def ts_now():
 	if ts := os.environ.get('NBRPC_TEST_TS'): return float(ts) + int(1e9)
@@ -86,8 +88,12 @@ class NBRPDB:
 			create unique index if not exists addrs_pk on addrs (host, addr);
 			create index if not exists addrs_ts_check on addrs (ts_check);''',
 
+		# ts_check_failing is same as ts_check, but for spacing-out alt-route checks
 		'''alter table addrs add column ts_check_failing real not null default 0;
-			create index if not exists addrs_ts_check_failing on addrs (ts_check_failing);''' ]
+			create index if not exists addrs_ts_check_failing on addrs (ts_check_failing);''',
+		# ts_down >= ts_update marks addr as non-existant for host-state purposes,
+		#  which alt-route checks set for state=na ones, when it looks down on both sides
+		'alter table addrs add column ts_down real not null default 0;' ]
 
 	def __init__(self, path, lock_timeout=60, lazy=False, debug=False):
 		import sqlite3
@@ -174,15 +180,16 @@ class NBRPDB:
 			p_set_tpl = ', '.join('?'*len(p_set))
 			c.execute(f'delete from host_files where path in ({p_set_tpl})', tuple(p_set))
 
-	def _state_val(self, s):
-		# Used for host and addr states
+	def st_val(self, s):
+		'State str to bool/none, used for both host and addr states.'
 		# "skipped" is addr state for when curl can't be run
 		# "failing" is a host state, same as "ok" except for alt-route checks
 		if not s or s == 'skipped': return None
-		elif s in ['ok', 'failing']: return True
+		elif s in ['ok', 'failing', 'unstable']: return True
 		else: return False
 
-	def _state_val_addr(self, v): # check result -> db state for addrs
+	def st_str(self, v):
+		'State bool/none/str to str for db field or output.'
 		return {True: 'ok', False: 'na', None: 'skipped'}.get(v, v)
 
 	_check = cs.namedtuple('Chk', 't res')
@@ -200,7 +207,7 @@ class NBRPDB:
 			c.execute( 'select chk, host, state from hosts'
 				f' where {chk} order by ts_check limit ?', (val, n) )
 			return list( self._host_check(
-				self._chk(chk).t, host, self._state_val(s) ) for chk, host, s in c.fetchall())
+				self._chk(chk).t, host, self.st_val(s) ) for chk, host, s in c.fetchall())
 
 	def host_update(self, ts, host, addrs=list(), addr_timeout=None, addr_limit=None):
 		with self() as c:
@@ -212,8 +219,8 @@ class NBRPDB:
 				c.execute( 'insert or ignore into addrs'
 					' (host, addr, ts_seen) values (?, ?, ?)', (host, addr, ts) )
 				if not c.lastrowid:
-					c.execute( 'update addrs set ts_seen = ? where'
-						' host = ? and addr = ?', (ts, host, addr) )
+					c.execute( 'update addrs set ts_seen = ?'
+						' where host = ? and addr = ?', (ts, host, addr) )
 					self._upd_check(c, host, addr)
 
 			ts_cutoff = addr_timeout and (ts - addr_timeout)
@@ -229,14 +236,18 @@ class NBRPDB:
 	def addr_checks(self, ts_max, n, failing=False, force_host=None):
 		with self() as c:
 			if force_host: chk, chk_vals = 'host = ?', [force_host]
-			elif failing: chk, chk_vals = 'ts_check_failing <= ?', [ts_max]
+			elif failing:
+				chk, chk_vals = ( 'addrs.state != ?'
+					' and ts_check_failing <= ?', ['ok', ts_max] )
 			else: chk, chk_vals = 'addrs.ts_check <= ?', [ts_max]
-			if failing: chk += ' and hosts.state = ?'; chk_vals.append('failing')
+			if failing:
+				chk += ' and hosts.state in (?, ?)'
+				chk_vals.extend(['failing', 'unstable'])
 			c.execute( 'select chk, host, addr, addrs.state'
 				f' from addrs join hosts using (host) where {chk}'
 				' order by addrs.ts_check limit ?', (*chk_vals, n) )
 			return list(self._addr_check(
-					*self._chk(chk), host, ip.ip_address(addr), self._state_val(s) )
+					*self._chk(chk), host, ip.ip_address(addr), self.st_val(s) )
 				for chk, host, addr, s in c.fetchall() )
 
 	def addr_update(self, ts, host, addr, state0, state1):
@@ -244,66 +255,73 @@ class NBRPDB:
 			if state0 == state1: upd, upd_args = '', list()
 			else:
 				upd = ', state = ?, ts_update = ?'
-				upd_args = self._state_val_addr(state1), ts
+				upd_args = self.st_str(state1), ts
 			addr = ip.ip_address(addr).compressed
-			c.execute( f'update addrs set ts_check = ?{upd}'
-				' where host = ? and addr = ?', (ts, *upd_args, host, addr) )
+			c.execute( 'update addrs set'
+				' ts_down = case when ts_down >= ts_check then ts_update else 0 end,'
+				f' ts_check = ?{upd}  where host = ? and addr = ?', (ts, *upd_args, host, addr) )
 			self._upd_check(c, host, addr)
 
 	def addr_update_failing(self, ts, ac, ad):
 		with self() as c:
-			for bump, ast in enumerate([ac.difference(ad), ad]):
-				if not ast: continue
-				ast = list(ip.ip_address(addr).compressed for addr in ast)
-				chk, val = ('ts_update = ?,', [ts]) if not bump else ('', [])
-				c.execute( f'update addrs set {chk} ts_check = ?'
-					f' where addr in ({", ".join("?"*len(ast))})', (*val, ts, *ast) )
+			for is_down, ast in enumerate([ac.difference(ad), ad]):
+				if not (ast := list(ip.ip_address(addr).compressed for addr in ast)): continue
+				down, vals = (', ts_down = ?', [ts]) if is_down else ('', [])
+				c.execute( f'update addrs set ts_check_failing = ?{down} where'
+					f' addr in ({", ".join("?"*len(ast))}) and state != ?', (ts, *vals, *ast, 'ok') )
 				self._upd_check(c, ast, rc=len(ast))
 
 	_addr_policy_upd = cs.namedtuple('AddrPolicyUpd', 't host state0 state addrs')
 	def host_state_sync(self, ts, td_ok, td_na, host_iter):
 		# Host state changes always bump ts_update, and go like this:
 		#  ??? -> [ok, na] ::
-		#  ok -[chk-fail]-> failing :: na -[chk-ok + td_ok]-> ok ::
+		#  ok -[chk-fail]-> failing :: na (ts<now-td_ok) -[chk-ok]-> ok ::
 		#  failing -[chk-ok]-> ok :: failing -[chk-fail + td_na]-> na
-		# Outside of db, "failing" state translates to True, same as "ok".
-		changes, hs_failing, hs_rec = list(), list(), list()
+		# "ok" with some addrs having ts_down set = "unstable".
+		# Outside of db, "failing" and "unstable" translate to True, same as "ok".
+		# Returns ok/blocked changes, without ok -> failing and such.
+		changes, st_updates = list(), cs.defaultdict(set)
 		with self() as c:
 			hs_tpl = ', '.join('?'*len(hs := set(host_iter)))
-			c.execute(
-				'select host, chk, addr, hosts.ts_update, hosts.state, addrs.state'
+			c.execute( 'select'
+					' host, chk, addr, hosts.ts_update, hosts.state,'
+					' addrs.state, addrs.ts_update, addrs.ts_down'
 				' from addrs join hosts using (host)'
 				f' where host in ({hs_tpl}) order by host', tuple(hs) )
 			for host, host_tuples in it.groupby(c.fetchall(), key=op.itemgetter(0)):
 				addrs, sas = set(), (set(), set())
-				for host, chk, addr, ts_upd, shs, sa in host_tuples:
-					addrs.add(addr); sas[':' in addr].add(self._state_val(sa))
-				sa, sh, td_upd = None, self._state_val(shs), ts - ts_upd
+				for host, chk, addr, ts_upd, shs, sa, ts_au, ts_ad in host_tuples:
+					if ts_ad >= ts_au: st_updates['unstable'].add(host)
+					else: addrs.add(addr); sas[':' in addr].add(self.st_val(sa))
+				sa, sh, td_upd = None, self.st_val(shs), ts - ts_upd
+
 				for saf in sas:
 					saf = list(sa for sa in saf if sa is not None)
 					if not saf: continue # all-unknowns
 					if all(sa is True for sa in saf): sa = True; break # any family all-good
 					sa = False # any family not all-good = N/A state
 				if sa != sh:
-					# log.debug(
-					# 	'host-upd: {} sa={} sh={}[{}] time[ since-upd={} to-ok={} to-na={} ]',
-					# 	host, sa, sh, shs, *map(ts_fmt, [td_upd, td_ok, td_na]) )
+					log.debug(
+						'host-upd: {} sa={} sh={}[{}] time[ since-upd={} to-ok={} to-na={} ]',
+						host, sa, sh, shs, *map(td_fmt, [td_upd, td_ok, td_na]) )
 					if sa and td_upd < td_ok: continue # "na" host-state, all-ok on addrs, but too soon
-					if not sa and td_upd < td_na: # either in "failing" state, or ok->failing transition
-						if shs == 'ok': hs_failing.append(host)
-						continue
+					if not sa:
+						if shs == 'ok': st_updates['failing'].add(host); continue
+						elif td_upd < td_na: continue # delays failing/unstable -> na transition
 					changes.append(self._addr_policy_upd(self._chk(chk).t, host, sh, sa, addrs))
-				elif sa and shs == 'failing': hs_rec.append(host) # failing->ok recovery
-			for stk, hs in ('failing', hs_failing), ('ok', hs_rec), (True, ...), (False, ...):
-				if hs is ...:
-					hs = set(apu.host for apu in changes if apu.state is stk)
-					st = 'ok' if stk else 'na'
-				else: st = stk
-				if not hs: continue
+					st_updates[self.st_str(sa)].add(host)
+				elif sa and shs not in ['ok', 'na']: st_updates['ok'].add(host) # failing/unstable -> ok
+
+			hss = set()
+			st_updates['ok'].update(st_updates.pop('skipped', set())) # no addrs = ok
+			for st in 'na', 'failing', 'unstable', 'ok':
+				if not (hs := st_updates.pop(st, set())): continue
+				hs.difference_update(hss); hss.update(hs)
 				hs_tpl = ', '.join('?'*len(hs))
 				c.execute( 'update hosts set state = ?,'
 					f' ts_update = ? where host in ({hs_tpl})', (st, ts, *hs) )
-				self._upd_check(c, stk, hs, rc=len(hs))
+				self._upd_check(c, st, hs, rc=len(hs))
+			if st_updates: raise ValueError(st_updates)
 		return changes
 
 	_addr_policy = cs.namedtuple( 'AddrPolicy',
@@ -317,7 +335,7 @@ class NBRPDB:
 				' order by host, addr like ?, addr', ('%:%',) )
 			return list(
 				self._addr_policy( self._chk(chk).t, host,
-					self._state_val(s) if not st_raw else s, s_ts, addr, sa, sa_ts )
+					self.st_val(s) if not st_raw else s, s_ts, addr, sa, sa_ts )
 				for host, chk, s, s_ts, addr, sa, sa_ts in c.fetchall() )
 
 
@@ -401,7 +419,8 @@ class NBRPC:
 
 	def print_checks(self, line_len=110, line_len_diff=-16):
 		with cl.suppress(OSError): line_len = os.get_terminal_size().columns + line_len_diff
-		st_map = {None: '???', 'ok': 'OK', 'na': 'blocked', 'failing': '-failing-'}
+		st_map = { None: '???', 'ok': 'OK',
+			'na': 'blocked', 'failing': '-failing-', 'unstable': '/unstable/' }
 		for host, addrs in sorted( ( (host, list(addrs)) for host, addrs in
 					it.groupby(self.db.host_state_policy(st_raw=True), key=op.attrgetter('host')) ),
 				key=lambda host_addrs: host_addrs[0][::-1] ):
@@ -492,7 +511,7 @@ class NBRPC:
 			self.log_td( 'addrs', 'Finished host-addrs check [ok={} fail={}'
 				' skip={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
 			for chk in addr_checks:
-				res_str = self.db._state_val_addr(res.get(chk.addr))
+				res_str = self.db.st_str(res.get(chk.addr))
 				self.log.debug( 'Host-addr check: {} [{} {}] - {}',
 					chk.addr.compressed, chk.t, chk.host, res_str )
 			for chk in addr_checks:
@@ -540,9 +559,9 @@ class NBRPC:
 
 		res = self.run_addr_checks(addr_checks)
 		n_fail = len(res) - (n_ok := sum((r is True) for r in res.values()))
-		self.log_td( 'addrs', 'Finished failing host-addrs check [confirmed={}'
-			' down={} nc={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
-		addrs_down = set(addr for addr, r in res.items() if r is not True)
+		self.log_td( 'addrs', 'Finished failing host-addrs check [ok-here={}'
+			' down-too={} skip={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
+		addrs_down = set(addr for addr, r in res.items() if r is False)
 		addrs_chk = set(chk.addr for chk in addr_checks)
 
 		if addrs_down:
@@ -764,12 +783,12 @@ def main(args=None, conf=None):
 		Can be combined with -S/--sync-on-start to force-replace policy before exit.'''))
 	group.add_argument('-F', '--failing-checks', action='store_true', help=dd('''
 		Special mode that only bumps grace period for ok -> failing -> n/a
-			state transition for endpoints if check for that endpoint fails in this instance.
+			state transition for endpoints if check for that endpoint fails in this instance too.
 		Script in this mode is intended to be run through separate network connection,
 			preventing endpoint from transitioning into "n/a" state if it appears to be down
-			through that additional network perspective as well, e.g. due to global service outage.
-		Only re-checks endpoints that are in a "failing" state,
-			so requires main script instance to create/mark such in the db.
+			through that additional network perspective as well, e.g. due to some service outage.
+		Only re-checks endpoints for hosts that are in a "failing" state,
+			so requires main script instance to create/mark such in the database.
 		Limit/interval/timeout opts that apply to main loop and checks are used here as well,
 			e.g. "checks" interval between db checks, "addr-state" between per-addr checks, etc.
 		Does not need/use -f/--check-list-file option.'''))
@@ -880,8 +899,12 @@ def main(args=None, conf=None):
 		if opts.unbound_zone_for: return nbrpc.print_unbound_zone(opts.unbound_zone_for)
 		signal.signal(signal.SIGQUIT, lambda sig,frm: None)
 		signal.signal(signal.SIGHUP, lambda sig,frm: setattr(conf, 'update_sync', True))
-		log.debug('Starting nbrpc main loop...')
-		(nbrpc.run if not opts.failing_checks else nbrpc.run_failing)()
+		if not opts.failing_checks:
+			log.debug('Starting nbrpc main loop...')
+			nbrpc.run()
+		else:
+			log.debug('Starting nbrpc main loop (failing-checks-confirm mode)...')
+			nbrpc.run_failing()
 	log.debug('Finished')
 
 if __name__ == '__main__': sys.exit(main())

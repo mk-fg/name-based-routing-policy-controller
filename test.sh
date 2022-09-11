@@ -45,11 +45,13 @@ test_run_cmd=(
 	-i host-ok-state=1000 # <20min, same for ok->na
 	-t host-addr=5000 # <100min, to forget not-seen dns addr
 	-SUn9999 -x- "${opts[@]}" ) # -n disables other intervals
+test_run_opts=()
 test_run() {
 	[[ -z "$1" ]] || ts=$1
 	[[ -z "$2" ]] && ts_sec=0 || ts_sec=$2
 	NBRPC_TEST_TS=$(($ts * 61 + $ts_sec)) \
-	"${test_run_cmd[@]}" >"$tmpdir"/out.txt; }
+	"${test_run_cmd[@]}" "${test_run_opts[@]}" >"$tmpdir"/out.txt
+	test_run_opts=(); }
 test_policy() { "${test_run_cmd[@]}" -P >"$tmpdir"/out.txt; }
 
 # policy_dump() { ./nbrpc.py -f "$chks" -d "$db" -P; } # uncomment to enable
@@ -60,9 +62,22 @@ test_policy() { "${test_run_cmd[@]}" -P >"$tmpdir"/out.txt; }
 
 
 ### Actual tests
+# Unrelated blocks of tests should run "rm -f $db" at the start to flush old host/addr info
+# ts= value is used to track progress and report fail position, so increasing throughout these
 
 
-## Initial ok state
+## Initial states
+
+rm -f "$db"
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0'
+test_run 0
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+rm "$db"
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
 test_run 0
 cat >"$tmpdir"/out.expected.txt <<EOF
@@ -71,9 +86,21 @@ ok test 0.0.0.2 https
 EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
+rm "$db"
+echo >"$run" ''
+test_run 0
+cat >"$tmpdir"/out.expected.txt <<EOF
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+test_policy
+diff -uB "$tmpdir"/out{.expected,}.txt
+
 
 ## Flapping ok->na->ok addr, with ok->failing->ok host-state
 
+rm -f "$db"
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
+test_run 0
 echo >"$run" 'test@0.0.0.1=0 0.0.0.2'
 test_run 1
 cat >"$tmpdir"/out.expected.txt <<EOF
@@ -174,6 +201,12 @@ cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.3 https
 EOF
+echo >"$run" 'test@0.0.0.1=0 0.0.0.3'
+test_run 101
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.3 https
+EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 echo >"$run" 'test@0.0.0.1 0.0.0.3=0'
 test_run 120
@@ -185,7 +218,7 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.03:48]:
-  0.0.0.1 :: [2001-09-09.02:38] ok
+  0.0.0.1 :: [2001-09-09.03:48] ok
   0.0.0.3 :: [2001-09-09.03:48] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
@@ -197,9 +230,185 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.04:09]:
-  0.0.0.1 :: [2001-09-09.02:38] ok
+  0.0.0.1 :: [2001-09-09.03:48] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
+
+# ok->na transition delay
+echo >"$run" 'test@0.0.0.1=0'
+test_run 150
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+EOF
+test_run 160
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+EOF
+
+
+## Alt-route checks and failing/unstable states
+
+rm -f "$db"
+echo >"$run" 'test@0.0.0.1'
+test_run 180
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@0.0.0.3'
+test_run 200
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 0.0.0.3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+# test1: failing -> blocked if alt-route check works
+
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0 test@0.0.0.3'
+test_run 201; test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https -failing- @ 2001-09-09.05:11]:
+  0.0.0.1 :: [2001-09-09.05:11] na
+  0.0.0.2 :: [2001-09-09.05:11] na
+  0.0.0.3 :: [2001-09-09.05:10] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# One workaround check succeeds, "ok" addr untouched, host will be blocked
+echo >"$run" '0.0.0.1 test@0.0.0.2=0 test@0.0.0.3=0'
+test_run_opts+=( -F ); test_run 207; test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https -failing- @ 2001-09-09.05:11]:
+  0.0.0.1 :: [2001-09-09.05:11] na
+  0.0.0.2 :: [2001-09-09.05:11] na
+  0.0.0.3 :: [2001-09-09.05:10] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" '0.0.0.1=0 test@0.0.0.2=0 test@0.0.0.3'
+test_run 211; test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.05:21]:
+  0.0.0.1 :: [2001-09-09.05:11] na
+  0.0.0.2 :: [2001-09-09.05:11] na
+  0.0.0.3 :: [2001-09-09.05:10] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# When legit-na addr forgotten, blocked state stays in place
+# Because alt-route checks are only done for state=failing hosts
+test_run_opts+=( -F ); test_run 299
+test_run 300; test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.05:21]:
+  0.0.0.2 :: [2001-09-09.05:11] na
+  0.0.0.3 :: [2001-09-09.05:10] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# test2: failing->unstable if alt-route checks fail too
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@0.0.0.3'
+test_run 301
+
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0 0.0.0.3'
+test_run 302; test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https -failing- @ 2001-09-09.06:53]:
+  0.0.0.1 :: [2001-09-09.06:53] na
+  0.0.0.2 :: [2001-09-09.06:53] na
+  0.0.0.3 :: [2001-09-09.05:10] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+test_run_opts+=( -F ); test_run 308
+
+test_run 312; test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https /unstable/ @ 2001-09-09.07:03]:
+  0.0.0.1 :: [2001-09-09.06:53] na
+  0.0.0.2 :: [2001-09-09.06:53] na
+  0.0.0.3 :: [2001-09-09.05:10] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# still unstable after last "ok" forgotten
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0 0.0.0.3'
+test_run_opts+=( -F ); test_run 400
+test_run 401
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https /unstable/ @ 2001-09-09.08:34]:
+  0.0.0.1 :: [2001-09-09.06:53] na
+  0.0.0.2 :: [2001-09-09.06:53] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# unstable -> na
+cp -a "$db"{,.bak}
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0'
+test_run 410
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+# unstable -> ok
+mv "$db"{.bak,}
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
+test_run 411
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.08:44]:
+  0.0.0.1 :: [2001-09-09.08:44] ok
+  0.0.0.2 :: [2001-09-09.08:44] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# test3: individual addrs flapping on the other side
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
+test_run 412
+test_run 420
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0'
+test_run 421
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0'
+test_run_opts+=( -F ); test_run 427
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2'
+test_run_opts+=( -F ); test_run 428
+
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0'
+test_run 430
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https /unstable/ @ 2001-09-09.09:03]:
+  0.0.0.1 :: [2001-09-09.08:54] na
+  0.0.0.2 :: [2001-09-09.08:54] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
 
 
 ### Finished
