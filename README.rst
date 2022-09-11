@@ -433,8 +433,8 @@ Related links, tips, info and trivia
 - If some service is hopping between IPs too much, so that nbrpc can't catch-up
   with it, and occasionally-failing connections are annoying, script has
   ``-Z/--unbound-zone-for`` option to export local-zone with only A/AAAA records
-  known to it for regexp-filtered list of known/managed hostnames
-  (can be just ``-Z.`` to dump all of them).
+  known to it (or some subset - see option description) for regexp-filtered list
+  of known/managed hostnames (can be just ``-Z.`` to dump all of them).
 
   Output produced there can be used with `Unbound`_'s (DNS resolver/cache
   daemon) ``include:`` directive, or parsed as YAML_ for any other local resolver.

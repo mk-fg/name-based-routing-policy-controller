@@ -299,11 +299,11 @@ class NBRPDB:
 					saf = list(sa for sa in saf if sa is not None)
 					if not saf: continue # all-unknowns
 					if all(sa is True for sa in saf): sa = True; break # any family all-good
-					sa = False # any family not all-good = N/A state
+					sa = False # all families not all-good = N/A state
 				if sa != sh:
-					log.debug(
-						'host-upd: {} sa={} sh={}[{}] time[ since-upd={} to-ok={} to-na={} ]',
-						host, sa, sh, shs, *map(td_fmt, [td_upd, td_ok, td_na]) )
+					# log.debug(
+					# 	'host-upd: {} sa={} sh={}[{}] time[ since-upd={} to-ok={} to-na={} ]',
+					# 	host, sa, sh, shs, *map(td_fmt, [td_upd, td_ok, td_na]) )
 					if sa and td_upd < td_ok: continue # "na" host-state, all-ok on addrs, but too soon
 					if not sa:
 						if shs == 'ok': st_updates['failing'].add(host); continue
@@ -326,12 +326,18 @@ class NBRPDB:
 
 	_addr_policy = cs.namedtuple( 'AddrPolicy',
 		't host state state_ts addr addr_st addr_st_ts' )
-	def host_state_policy(self, st_raw=False):
+	def host_state_policy(self, st_raw=False, last_seen_addrs=False):
 		with self() as c:
+			tsl_with = tsl_join = tsl_chk = ''
+			if last_seen_addrs:
+				tsl_with = ( 'with tsl as ('
+					' select host, max(ts_seen) as tsl from addrs group by host )' )
+				tsl_join, tsl_chk = 'left join tsl using (host)', 'and addrs.ts_seen = tsl'
 			c.execute(
-				'select host, chk, hosts.state,'
+				f'{tsl_with} select host, chk, hosts.state,'
 					' hosts.ts_update, addr, addrs.state, addrs.ts_update'
-				' from hosts left join addrs using (host) where addr not null'
+				f' from hosts left join addrs using (host) {tsl_join}'
+				f' where addr not null {tsl_chk}'
 				' order by host, addr like ?, addr', ('%:%',) )
 			return list(
 				self._addr_policy( self._chk(chk).t, host,
@@ -433,14 +439,20 @@ class NBRPC:
 				print(line)
 		print()
 
-	def print_unbound_zone(self, re_host):
-		re_host = re.compile(re_host)
+	def print_unbound_zone(self, spec):
+		filters = re.search('^([@>+*]*)', spec)
+		filters, spec = filters.group(), spec[filters.end():]
+		re_host = re.compile(spec)
 		for host, addrs in it.groupby(
-				self.db.host_state_policy(), key=op.attrgetter('host') ):
+				self.db.host_state_policy(last_seen_addrs='@' in filters),
+				key=op.attrgetter('host') ):
 			if not re_host.search(host): continue
 			for n, st in enumerate(addrs):
 				if not n: print(f'\nlocal-zone: {st.host}. static')
 				rt = ['A', 'AAAA'][':' in st.addr]
+				if '>' in filters and st.addr_st != 'ok': continue
+				if '+' in filters and rt != 'A': continue
+				if '*' in filters and rt != 'AAAA': continue
 				print(f"local-data: '{st.host} {rt} {st.addr}'")
 
 
@@ -800,6 +812,9 @@ def main(args=None, conf=None):
 			to avoid application errors due to them resolving same name(s) to some diff ones.
 		Specified regexp (python re format) should match host(s)
 			in the database, empty output will be produced on no match.
+		Returned addresses can be also filtered by using following prefix(-es) before regexp:
+			@ - limit to only addrs seen in last in getaddrinfo() result for hostname;
+			> - only directly-accessible addrs; + - A (IPv4) only; * - AAAA (IPv6) only.
 		Make sure this script doesn't use such restricted resolver itself.'''))
 	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
 		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
@@ -890,7 +905,6 @@ def main(args=None, conf=None):
 			res = results[res.addr] = _res_line(host, ip.ip_address(addr), res)
 			results[res.host].append(res)
 
-	log.debug('Initializing nbrpc...')
 	for sig in signal.SIGINT, signal.SIGTERM:
 		signal.signal( sig, lambda sig,frm:
 			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
@@ -905,6 +919,6 @@ def main(args=None, conf=None):
 		else:
 			log.debug('Starting nbrpc main loop (failing-checks-confirm mode)...')
 			nbrpc.run_failing()
-	log.debug('Finished')
+		log.debug('Finished')
 
 if __name__ == '__main__': sys.exit(main())

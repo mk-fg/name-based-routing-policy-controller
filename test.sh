@@ -68,7 +68,8 @@ test_policy() { "${test_run_cmd[@]}" -P >"$tmpdir"/out.txt; }
 
 ## Initial states
 
-rm -f "$db"
+rm -f "$db"; echo >"$chks" test
+
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0'
 test_run 0
 cat >"$tmpdir"/out.expected.txt <<EOF
@@ -77,18 +78,16 @@ na test 0.0.0.2 https
 EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
-rm "$db"
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
-test_run 0
+rm "$db"; test_run
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https
 EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
-rm "$db"
 echo >"$run" ''
-test_run 0
+rm "$db"; test_run
 cat >"$tmpdir"/out.expected.txt <<EOF
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
@@ -98,7 +97,8 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 
 ## Flapping ok->na->ok addr, with ok->failing->ok host-state
 
-rm -f "$db"
+rm -f "$db"; echo >"$chks" test
+
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
 test_run 0
 echo >"$run" 'test@0.0.0.1=0 0.0.0.2'
@@ -248,7 +248,7 @@ EOF
 
 ## Alt-route checks and failing/unstable states
 
-rm -f "$db"
+rm -f "$db"; echo >"$chks" test
 echo >"$run" 'test@0.0.0.1'
 test_run 180
 
@@ -408,6 +408,132 @@ test [https /unstable/ @ 2001-09-09.09:03]:
   0.0.0.2 :: [2001-09-09.08:54] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
+
+
+## Default AF failure policy
+
+rm -f "$db"; echo >"$chks" test
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::1 test@1::2'
+rm -f "$db"; test_run 450
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::1 https
+ok test 1::2 https
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::1=0 test@1::2'
+rm -f "$db"; test_run 451
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::1 https
+na test 1::2 https
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::1 test@1::2=0'
+rm -f "$db"; test_run 452
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::1 https
+ok test 1::2 https
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+
+## DNS zone exports
+
+rm -f "$db"; echo >"$chks" test
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3'
+rm -f "$db"; test_run 500
+test_run_opts+=( -Z. ); test_run
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+local-data: 'test A 0.0.0.2'
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3'
+rm -f "$db"; test_run 501
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.10:16]:
+  0.0.0.1 :: [2001-09-09.10:16] ok
+  0.0.0.2 :: [2001-09-09.10:16] na
+  1::3 :: [2001-09-09.10:16] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+test_run_opts+=( -Z. ); test_run 502
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+local-data: 'test A 0.0.0.2'
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+test_run_opts+=( '-Z>.' ); test_run 503
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+test_run_opts+=( '-Z>+.' ); test_run 504
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+test_run_opts+=( '-Z+>>.' ); test_run 505
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+test_run_opts+=( '-Z*^.' ); test_run 506
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" '0.0.0.1 test@0.0.0.2=0 test@1::3'
+test_run 511
+test_run_opts+=( '-Z@.' ); test_run 512
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.2'
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+test_run_opts+=( '-Z*@.' ); test_run 513
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" '0.0.0.1 test@0.0.0.2=0 1::3'
+test_run 514
+test_run_opts+=( '-Z@.' ); test_run 515
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.2'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+test_run_opts+=( '-Z@*.' ); test_run 516
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
 
 
 
