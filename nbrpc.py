@@ -299,6 +299,7 @@ class NBRPDB:
 				' ts_down = case when ts_down >= ts_check then ts_update else 0 end,'
 				f' ts_check = ?{upd}  where host = ? and addr = ?', (ts, *upd_args, host, addr) )
 			self._upd_check(c, host, addr)
+			return self._st_val(state1)
 
 	def addr_update_failing(self, ts, ac, ad):
 		with self() as c:
@@ -565,13 +566,13 @@ class NBRPC:
 			self.log_td( 'addrs', 'Finished host-addrs check [ok={} fail={}'
 				' skip={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
 			for chk in addr_checks:
-				res_str = {True: 'ok', False: 'na', None: '???'}[res.get(chk.addr)]
+				res_str = {True: 'ok', False: 'na', None: '???'}.get(s := res.get(chk.addr), s)
 				self.log.debug( 'Host-addr check: {} [{} {}] - {}',
 					chk.addr.compressed, chk.t.s, chk.host, res_str )
 			policy_host_key = op.attrgetter(*'host host_st p t.s'.split())
 			for chk in addr_checks:
-				self.db.addr_update( ts, chk.host,
-					chk.addr, chk.state, st := res.get(chk.addr) )
+				st = self.db.addr_update( ts, chk.host,
+					chk.addr, chk.state, res.get(chk.addr) )
 				if st != chk.state:
 					if (hk := policy_host_key(chk)) not in policy_changes:
 						policy_changes[hk] = self._policy_t(*hk, dict())
@@ -688,7 +689,7 @@ class NBRPC:
 			# Can also check tls via --cacert and --pinnedpubkey <hashes>
 			res_map = dict()
 			for n, chk in enumerate(addr_checks_curl.values()):
-				host, addr, port = chk.host, chk.addr.compressed, curl_ports[chk.svc]
+				host, addr, port = chk.host, chk.addr.compressed, curl_ports[chk.t.svc]
 				try:
 					res_map[chk.t.res] = set( int(n.strip() or -1)
 						for n in (chk.t.res or curl_res_default).split('/') )
@@ -699,7 +700,7 @@ class NBRPC:
 				if ':' in addr: addr = f'[{addr}]'
 				if n: curl.stdin.write(b'next\n')
 				curl.stdin.write('\n'.join([ '',
-					f'url = "{chk.s}://{host}:{port}{chk.ext or "/"}"',
+					f'url = "{chk.t.s}://{host}:{port}{chk.t.ext or "/"}"',
 					f'resolve = {host}:{port}:{addr}', # --connect-to can also be used
 					f'user-agent = "{self.conf.curl_ua}"',
 					f'connect-timeout = {curl_to}', f'max-time = {curl_to}',
@@ -892,7 +893,7 @@ def main(args=None, conf=None):
 			in the database, empty output will be produced on no match.
 		Returned addresses can be also filtered by using following prefix(-es) before regexp:
 			@ - limit to only addrs seen in last in getaddrinfo() result for hostname;
-			% - return records in shuffled order; > - only directly-accessible addrs;
+			%% - return records in shuffled order; > - only directly-accessible addrs;
 			+ - A (IPv4) only; * - AAAA (IPv6) only.
 		Using these flags disregards any per-host DNS filtering policies, if specified.
 		Make sure this script doesn't use such restricted resolver itself.'''))
