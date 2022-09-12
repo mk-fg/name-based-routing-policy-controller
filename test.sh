@@ -89,7 +89,7 @@ ok test 0.0.0.2 https
 EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
-echo >"$run" ''
+echo >"$run" '0.0.0.5'
 rm "$db"; test_run
 cat >"$tmpdir"/out.expected.txt <<EOF
 EOF
@@ -703,34 +703,200 @@ diff -u "$tmpdir"/out{.expected,}.txt
 
 }
 
+# policy = af-any default
+
 rm -f "$db"; echo >"$chks" 'test'
 test_block_reroute_policy_afany 550
 rm -f "$db"; echo >"$chks" 'test>af-any'
 test_block_reroute_policy_afany 600
 
-# rm -f "$db"; echo >"$chks" 'test>af-all'
-# echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
-# test_run 650
-# cat >"$tmpdir"/out.expected.txt <<EOF
-# na test 0.0.0.1 https
-# na test 0.0.0.2 https
-# na test 1::3 https
-# na test 1::4 https
-# EOF
-# diff -u "$tmpdir"/out{.expected,}.txt
+# policy = af-all
 
-# rm -f "$db"
-# echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4'
-# test_run 660
-# echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3=0 test@1::4'
-# test_run 661; test_run 670
-# diff -u "$tmpdir"/out{.expected,}.txt
+rm -f "$db"; echo >"$chks" 'test>af-all'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run 650
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+rm -f "$db"
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4'
+test_run 670
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3=0 test@1::4'
+test_run 671; test_run 680
+diff -u "$tmpdir"/out{.expected,}.txt
+
+# policy = af-pick
+
+rm -f "$db"; echo >"$chks" 'test>af-pick'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4'
+test_run 700
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.13:38]:
+  0.0.0.1 :: [2001-09-09.13:38] ok
+  0.0.0.2 :: [2001-09-09.13:38] na
+  1::3 :: [2001-09-09.13:38] ok
+  1::4 :: [2001-09-09.13:38] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
+test_run 701; test_run 710
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.13:38]:
+  0.0.0.1 :: [2001-09-09.13:38] ok
+  0.0.0.2 :: [2001-09-09.13:38] na
+  1::3 :: [2001-09-09.13:39] na
+  1::4 :: [2001-09-09.13:38] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run 711; test_run 730
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.13:38]:
+  0.0.0.1 :: [2001-09-09.13:38] ok
+  0.0.0.2 :: [2001-09-09.13:49] ok
+  1::3 :: [2001-09-09.13:49] ok
+  1::4 :: [2001-09-09.13:49] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4'
+test_run 750
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.14:29]:
+  0.0.0.1 :: [2001-09-09.13:38] ok
+  0.0.0.2 :: [2001-09-09.13:49] ok
+  1::3 :: [2001-09-09.13:49] ok
+  1::4 :: [2001-09-09.14:29] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# policy = pick
+
+rm -f "$db"; echo >"$chks" 'test>pick'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run 800
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.15:20]:
+  0.0.0.1 :: [2001-09-09.15:20] ok
+  0.0.0.2 :: [2001-09-09.15:20] ok
+  1::3 :: [2001-09-09.15:20] ok
+  1::4 :: [2001-09-09.15:20] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2 test@1::3=0 test@1::4'
+test_run 801
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+ok test 0.0.0.2 https
+na test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4'
+test_run 802
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.15:20]:
+  0.0.0.1 :: [2001-09-09.15:22] ok
+  0.0.0.2 :: [2001-09-09.15:20] ok
+  1::3 :: [2001-09-09.15:22] ok
+  1::4 :: [2001-09-09.15:21] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+test_run 820
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.15:40]:
+  0.0.0.1 :: [2001-09-09.15:22] ok
+  0.0.0.2 :: [2001-09-09.15:20] ok
+  1::3 :: [2001-09-09.15:22] ok
+  1::4 :: [2001-09-09.15:21] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# policy = noroute
+
+rm -f "$db"; echo >"$chks" 'test>noroute'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4=0'
+test_run 830
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.15:50]:
+  0.0.0.1 :: [2001-09-09.15:50] ok
+  0.0.0.2 :: [2001-09-09.15:50] na
+  1::3 :: [2001-09-09.15:50] ok
+  1::4 :: [2001-09-09.15:50] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
 
 }
 
 
-### Run all test blocks above
-# Split into blocks to make it easy to re-run only specific block of linked ones
+### Run all test blocks from above
+# Split into blocks to make it easy to re-run only specific block of linked tests
 
 test_block_init
 test_block_basic

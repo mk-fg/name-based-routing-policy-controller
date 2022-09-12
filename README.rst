@@ -47,9 +47,6 @@ Scripts here are not intended to do any tricks to fool DPI, discard RST
 packets or otherwise work around specific censorshit types and implementations,
 just route stuff around whatever, whereever or by-whomever it is.
 
-Doesn't use any pre-made/updated lists like adblockers and such do,
-but can be used to produce one.
-
 If you don't want to run traffic over tunnels, and/or trying to bypass specific
 national firewalls, lookup tools like GreenTunnel_, GoodbyeDPI_, PowerTunnel_ or
 zapret_ instead.
@@ -304,8 +301,6 @@ Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-
   - ``pick`` - reroute individual addrs that appear to be blocked, instead of per-host/AF policy.
   - ``noroute`` - always return same "ok" for routing policy purposes.
 
-  XXX: selecting these are not implemented yet, script uses hardcoded ``af-any`` logic.
-
   ``dns-flags`` part is a combination of any number of one-char DNS-filtering
   flags from the following list:
 
@@ -339,8 +334,8 @@ Simple Example::
   httpbin.org:https/status/478=478
 
   ## Policy examples
-  www.wikipedia.org>pick.RL:https=200
-  abcdefg.cloudfront.net>LD:https/api=200
+  www.wikipedia.org>pick.RL
+  abcdefg.cloudfront.net>LD:https/api=400
 
 These config files can be missing, created, removed or changed on the fly,
 with their mtimes probed on every check interval, and contents reloaded as needed.
