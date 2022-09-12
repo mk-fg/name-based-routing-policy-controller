@@ -465,7 +465,7 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 
 ## DNS zone exports
 
-test_block_dns() {
+test_block_zone() {
 
 rm -f "$db"
 echo >"$chks" 'test>6' # -Z flags should always override that
@@ -560,7 +560,7 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 
 ## Per-host DNS options
 
-test_block_dns_policy() {
+test_block_zone_policy() {
 
 rm -f "$db"
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
@@ -895,6 +895,39 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 }
 
 
+## No-op type=dns checks
+
+test_block_type_dns() {
+
+rm -f "$db"; echo >"$chks" 'test:dns'
+echo >"$run" 'test@0.0.0.1=0 test@1::2 test@1::3=0'
+test_run 850
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 dns
+ok test 1::2 dns
+ok test 1::3 dns
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [dns OK @ 2001-09-09.16:10]:
+  0.0.0.1 :: [2001-09-09.16:10] ok
+  1::2 :: [2001-09-09.16:10] ok
+  1::3 :: [2001-09-09.16:10] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+test_run_opts+=( -Z. ); test_run 851
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+local-data: 'test AAAA 1::2'
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+}
+
+
 ### Run all test blocks from above
 # Split into blocks to make it easy to re-run only specific block of linked tests
 
@@ -902,8 +935,9 @@ test_block_init
 test_block_basic
 test_block_altroute
 test_block_afs
-test_block_dns
-test_block_dns_policy
+test_block_zone
+test_block_zone_policy
 test_block_reroute_policy
+test_block_type_dns
 
 err=0 # success for all tests above
