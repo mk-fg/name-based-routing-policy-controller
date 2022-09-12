@@ -280,6 +280,17 @@ Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-
   tend to change IPs, and names are required for https, SNI and proper vhost
   responses anyway.
 
+- ``check`` - type of check to run.
+
+  Currently supported checks: ``https``, ``http``, ``dns``. Default: ``https``.
+
+  http/https checks can also have a pre-encoded URL path included, e.g.
+  ``https/url/path...``, to query that for more useful response status code.
+  If there's ``=`` in URL path, replace/escape it with ``==``.
+
+- ``expected-result`` - for http(s) checks - response code(s) to treat as an OK result,
+  with anything else considered a failure, separated by slash ("/"). Default is 200/301/302.
+
 - ``policy`` - how to combine conflicting check results for different host addresses.
 
   This value should look like ``reroute-policy.dns-flags``, where both
@@ -301,28 +312,18 @@ Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-
   - ``4`` - only resolve and use/check IPv4 A records/addrs for host.
   - ``6`` - only resolve/use/check IPv6 AAAA addresses.
   - ``D`` - print only records for directly-accessible addrs of this host.
-  - ``R`` - only print records for inaccessible/rerouted addrs.
+  - ``N`` - only print records for inaccessible/rerouted addrs.
   - ``L`` - print only latest records IPs from last getaddrinfo() for host, not any earlier ones.
+  - ``R`` - always print records in a random (shuffled) order.
 
   Where "print" flags are only relevant when using ``-Z/--unbound-zone-for`` option.
 
-  Any combination of these should work - for example: ``pick.6``, ``LD4``,
-  ``af-all``, ``af-pick.RL`` - but using some DNS flags like ``46`` together
+  Any combination of these should work - for example ``pick.6``, ``LD4``,
+  ``af-all``, ``af-pick.NL`` - but using some DNS flags like ``46`` together
   makes them negate each other.
 
   Default value is ``af-any``.
   Can be changed via ``-p/--check-list-default-policy`` script option.
-
-- ``check`` - type of check to run.
-
-  Currently supported checks: ``https``, ``http``, ``dns``. Default: ``https``.
-
-  http/https checks can also have a pre-encoded URL path included, e.g.
-  ``https/url/path...``, to query that for more useful response status code.
-  If there's ``=`` in URL path, replace/escape it with ``==``.
-
-- ``expected-result`` - for http(s) checks - response code(s) to treat as an OK result,
-  with anything else considered a failure, separated by slash ("/"). Default is 200/301/302.
 
 Empty lines are fine, anything after # to the end of the line is ignored as comment.
 
@@ -337,7 +338,8 @@ Simple Example::
   fickle-site.net=200/503
   httpbin.org:https/status/478=478
 
-  ## Policy example
+  ## Policy examples
+  www.wikipedia.org>pick.RL:https=200
   abcdefg.cloudfront.net>LD:https/api=200
 
 These config files can be missing, created, removed or changed on the fly,

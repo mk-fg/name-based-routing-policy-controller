@@ -590,7 +590,7 @@ local-data: 'test A 0.0.0.1'
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
-echo >"$chks" 'test>6LR'
+echo >"$chks" 'test>6LN'
 test_run 523; test_run_opts+=( -Z. ); test_run 523
 cat >"$tmpdir"/out.expected.txt <<EOF
 local-zone: test. static
@@ -613,6 +613,120 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 }
 
 
+## Rerouting policy
+
+test_block_reroute_policy() {
+
+test_block_reroute_policy_afany() {
+local ts_base=$1
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4'
+test_run $(($ts_base + 0))
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4'
+test_run $(($ts_base + 1))
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4'
+test_run $(($ts_base + 10))
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
+test_run $(($ts_base + 11))
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
+test_run $(($ts_base + 20))
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run $(($ts_base + 21))
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run $(($ts_base + 30))
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run $(($ts_base + 40))
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+}
+
+rm -f "$db"; echo >"$chks" 'test'
+test_block_reroute_policy_afany 550
+rm -f "$db"; echo >"$chks" 'test>af-any'
+test_block_reroute_policy_afany 600
+
+# rm -f "$db"; echo >"$chks" 'test>af-all'
+# echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+# test_run 650
+# cat >"$tmpdir"/out.expected.txt <<EOF
+# na test 0.0.0.1 https
+# na test 0.0.0.2 https
+# na test 1::3 https
+# na test 1::4 https
+# EOF
+# diff -u "$tmpdir"/out{.expected,}.txt
+
+# rm -f "$db"
+# echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4'
+# test_run 660
+# echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3=0 test@1::4'
+# test_run 661; test_run 670
+# diff -u "$tmpdir"/out{.expected,}.txt
+
+}
+
 
 ### Run all test blocks above
 # Split into blocks to make it easy to re-run only specific block of linked ones
@@ -623,5 +737,6 @@ test_block_altroute
 test_block_afs
 test_block_dns
 test_block_dns_policy
+test_block_reroute_policy
 
 err=0 # success for all tests above

@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft, subprocess as sp
 import pathlib as pl, contextlib as cl, collections as cs, ipaddress as ip
-import os, sys, re, logging, time, socket, errno, signal, textwrap
+import os, sys, re, logging, time, socket, random, errno, signal, textwrap
 
 
 class LogMessage:
@@ -35,6 +35,7 @@ def ts_now():
 	if ts := os.environ.get('NBRPC_TEST_TS'): return float(ts) + int(1e9)
 	return time.time()
 
+# XXX: format this in a localtime-independent way, but compatible with mine for tests
 ts_fmt = lambda ts: time.strftime('%Y-%m-%d.%H:%M', time.gmtime(ts))
 
 
@@ -401,18 +402,18 @@ class NBRPC:
 		else: return spec
 
 	_host_policy = cs.namedtuple( 'HostPolicy',
-		'af_any af_all af_pick pick noroute dns_af dns_st dns_last' )
+		'af_any af_all af_pick pick noroute dns_af dns_st dns_last dns_shuf' )
 	def chk_policy(self, spec): # policy_str -> bool-flags-namedtuple
-		if not spec: return self._host_policy(True, *[False]*4, 0, None, False)
+		if not spec: return self._host_policy(True, *[False]*4, 0, None, *[False]*2)
 		if '.' in spec: route, dns = spec.split('.', 1)
-		elif not set(spec).difference('46DRL'): route, dns = 'af_any', spec
+		elif not set(spec).difference('46DNLR'): route, dns = 'af_any', spec
 		else: route, dns = spec, ''
-		v4, v6, ok, na, last = (k in dns for k in '46DRL')
+		v4, v6, ok, na, last, shuf = (k in dns for k in '46DNLR')
 		dns_af = [socket.AF_INET, socket.AF_INET6][v6] if v4^v6 else 0
 		try: route = self._host_policy._fields.index(route.lower().replace('-', '_'))
 		except ValueError: raise LookupError(f'Unrecognized reroute-policy: {route!r}')
 		return self._host_policy(*it.chain(
-			(n == route for n in range(5)), [dns_af, ok if ok^na else None, last] ))
+			(n == route for n in range(5)), [dns_af, ok if ok^na else None, last, shuf] ))
 
 	def host_map_sync(self, _re_rem=re.compile('#.*')):
 		if self.host_map is None: self.host_map = self.db.host_map_get()
@@ -459,23 +460,25 @@ class NBRPC:
 		print()
 
 	def print_unbound_zone(self, spec):
-		policy = re.search('^([@>+*]*)', spec)
+		policy = re.search('^([+*>@%]*)', spec)
 		policy, spec = policy.group(), spec[policy.end():]
-		if policy: policy = self.chk_policy(policy.translate(str.maketrans('@>+*', 'LD46')))
+		if policy: policy = self.chk_policy(policy.translate(str.maketrans('+*>@%', '46DLR')))
 		re_host = re.compile(spec)
 		for host, addrs in it.groupby(
 				self.db.host_state_policy(), key=op.attrgetter('host') ):
 			if not re_host.search(host): continue
-			for n, st in enumerate(addrs):
-				if not n: print(f'\nlocal-zone: {st.host}. static')
-				rt = ['A', 'AAAA'][':' in st.addr]
-				ap = policy or self.chk_policy(st.p)
+			records, ap = list(), None
+			for st in addrs:
+				rt, ap = ['A', 'AAAA'][':' in st.addr], policy or self.chk_policy(st.p)
 				if ap.dns_st is not None:
 					if ap.dns_st is not self.db.st_val(st.addr_st): continue
 				if ap.dns_af:
 					if (rt == 'A') is not ('6' not in ap.dns_af.name): continue
 				if ap.dns_last and not st.addr_last: continue
-				print(f"local-data: '{st.host} {rt} {st.addr}'")
+				records.append(f"local-data: '{st.host} {rt} {st.addr}'")
+			if ap:
+				if ap.dns_shuf: random.shuffle(records)
+				for line in [f'\nlocal-zone: {st.host}. static'] + records: print(line)
 
 
 	def run(self):
@@ -840,7 +843,8 @@ def main(args=None, conf=None):
 			in the database, empty output will be produced on no match.
 		Returned addresses can be also filtered by using following prefix(-es) before regexp:
 			@ - limit to only addrs seen in last in getaddrinfo() result for hostname;
-			> - only directly-accessible addrs; + - A (IPv4) only; * - AAAA (IPv6) only.
+			% - return records in shuffled order; > - only directly-accessible addrs;
+			+ - A (IPv4) only; * - AAAA (IPv6) only.
 		Using these flags disregards any per-host DNS filtering policies, if specified.
 		Make sure this script doesn't use such restricted resolver itself.'''))
 	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
