@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 
 import itertools as it, operator as op, functools as ft, subprocess as sp
-import pathlib as pl, contextlib as cl, collections as cs, ipaddress as ip
-import os, sys, re, logging, time, socket, random, errno, signal, textwrap
+import pathlib as pl, contextlib as cl, collections as cs, ipaddress as ip, datetime as dt
+import os, sys, re, logging, time, socket, random, errno, signal, textwrap, zoneinfo
 
 
 class LogMessage:
@@ -31,12 +31,14 @@ def td_fmt(td):
 	if s < 10 and ms > 0.001: v += f'.{ms*100:02.0f}'
 	return v
 
+def ts_fmt(ts):
+	if tz := os.environ.get('NBRPC_TEST_TZ', os.environ.get('TZ')):
+		tz = zoneinfo.ZoneInfo(tz)
+	return dt.datetime.fromtimestamp(ts, tz or None).strftime('%Y-%m-%d.%H:%M')
+
 def ts_now():
 	if ts := os.environ.get('NBRPC_TEST_TS'): return float(ts) + int(1e9)
 	return time.time()
-
-# XXX: format this in a localtime-independent way, but compatible with mine for tests
-ts_fmt = lambda ts: time.strftime('%Y-%m-%d.%H:%M', time.gmtime(ts))
 
 
 class NBRPConfig:

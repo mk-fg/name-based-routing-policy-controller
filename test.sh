@@ -9,6 +9,7 @@ set -eEo pipefail
 # env vars for testing:
 #  NBRPC_TEST_RUN=<run.txt-file>
 #  NBRPC_TEST_TS=<unix-timestamp>
+#  NBRPC_TEST_TZ=<tz-name-for-ZoneInfo> (UTC in tests)
 #
 # run.txt-file format (default <code> is check success):
 #  <hostname>@<ip-addr>[=<code>]
@@ -37,7 +38,7 @@ run="$tmpdir"/run.txt
 
 echo >"$chks" test
 
-export NBRPC_TEST_RUN="$run"
+export NBRPC_TEST_TZ=UTC NBRPC_TEST_RUN="$run"
 ts=0 ts_sec=0 # used in error msgs, to id exact failing test
 test_run_cmd=(
 	./nbrpc.py -f "$chks" -d "$db"
