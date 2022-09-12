@@ -68,6 +68,8 @@ test_policy() { "${test_run_cmd[@]}" -P >"$tmpdir"/out.txt; }
 
 ## Initial states
 
+test_block_init() {
+
 rm -f "$db"; echo >"$chks" test
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0'
@@ -94,10 +96,16 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 test_policy
 diff -uB "$tmpdir"/out{.expected,}.txt
 
+}
 
-## Flapping ok->na->ok addr, with ok->failing->ok host-state
+
+## Basic ok <-> failure transitions
+
+test_block_basic() {
 
 rm -f "$db"; echo >"$chks" test
+
+# Flapping ok->na->ok addr, with ok->failing->ok host-state
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
 test_run 0
@@ -131,8 +139,7 @@ test [https OK @ 2001-09-09.01:49]:
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
-
-## Normal ok <-> failure transitions
+# Normal ok/na stuff
 
 echo >"$run" 'test@0.0.0.1 0.0.0.2=0'
 test_run 10
@@ -245,8 +252,12 @@ cat >"$tmpdir"/out.expected.txt <<EOF
 na test 0.0.0.1 https
 EOF
 
+}
+
 
 ## Alt-route checks and failing/unstable states
+
+test_block_altroute() {
 
 rm -f "$db"; echo >"$chks" test
 echo >"$run" 'test@0.0.0.1'
@@ -409,8 +420,12 @@ test [https /unstable/ @ 2001-09-09.09:03]:
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
+}
+
 
 ## Default AF failure policy
+
+test_block_afs() {
 
 rm -f "$db"; echo >"$chks" test
 
@@ -444,14 +459,19 @@ ok test 1::2 https
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
+}
+
 
 ## DNS zone exports
 
-rm -f "$db"; echo >"$chks" test
+test_block_dns() {
+
+rm -f "$db"
+echo >"$chks" 'test>6' # -Z flags should always override that
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3'
 rm -f "$db"; test_run 500
-test_run_opts+=( -Z. ); test_run
+test_run_opts+=( -Z@. ); test_run
 cat >"$tmpdir"/out.expected.txt <<EOF
 local-zone: test. static
 local-data: 'test A 0.0.0.1'
@@ -471,7 +491,7 @@ test [https OK @ 2001-09-09.10:16]:
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
-test_run_opts+=( -Z. ); test_run 502
+test_run_opts+=( -Z@. ); test_run 502
 cat >"$tmpdir"/out.expected.txt <<EOF
 local-zone: test. static
 local-data: 'test A 0.0.0.1'
@@ -534,8 +554,74 @@ local-zone: test. static
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
+}
+
+
+## Per-host DNS options
+
+test_block_dns_policy() {
+
+rm -f "$db"
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
+
+echo >"$chks" 'test>4'
+test_run 520; test_run_opts+=( -Z. ); test_run 520
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+local-data: 'test A 0.0.0.2'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$chks" 'test>6'
+test_run 521; test_run_opts+=( -Z. ); test_run 521
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test AAAA 1::3'
+local-data: 'test AAAA 1::4'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$chks" 'test>D4'
+test_run 522; test_run_opts+=( -Z. ); test_run 522
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$chks" 'test>6LR'
+test_run 523; test_run_opts+=( -Z. ); test_run 523
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$chks" 'test>L'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
+test_run 524
+echo >"$run" '0.0.0.1 test@0.0.0.2=0 1::3=0 test@1::4'
+test_run 525; test_run_opts+=( -Z. ); test_run 525
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.2'
+local-data: 'test AAAA 1::4'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+}
 
 
 
-### Finished
-err=0
+### Run all test blocks above
+# Split into blocks to make it easy to re-run only specific block of linked ones
+
+test_block_init
+test_block_basic
+test_block_altroute
+test_block_afs
+test_block_dns
+test_block_dns_policy
+
+err=0 # success for all tests above

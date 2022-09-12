@@ -1,7 +1,8 @@
 Name-based Routing Policy Controller (nbrpc)
 ============================================
 
-A tool for monitoring service availibility and policy-routing around the issues.
+A tool for monitoring service availability and policy-routing around
+the issues deliberately and selectively created on either side, aka censorshit.
 
   | "The Net interprets censorship as damage and routes around it."
   | -- John Gilmore
@@ -9,23 +10,26 @@ A tool for monitoring service availibility and policy-routing around the issues.
 "The Net" won't do it all by itself however, hence the tool here.
 
 Especially useful these days, when local state, everyone around,
-and the rest of the world hate you, working together to cut you off from
-the interwebs, if you happen to live in a wrong place at a wrong time.
+and the rest of the world hate you, working together to cut you off
+from the interwebs, if you happen to live in a wrong place at a wrong time,
+but it does seem to be a global trend too.
 
 .. contents::
   :backlinks: none
 
 
-Description
------------
+More Description
+----------------
 
-Script for monitoring DNS names for whether services on their IPs are not
-accessible through direct connections and configuring linux policy routing
-for alternative paths to those hosts.
+It is a script for monitoring DNS names for whether services on their IPs
+are not accessible through direct connections and configuring linux (probably)
+policy routing to use alternative paths to those hosts.
 
-Purpose is to work around access issues to often-used known-in-advance websites
-that get blocked on either side of the route to them (by either state censorship
-or geo-blocking), without running all traffic through tunnels unnecessarily.
+Purpose is to work around access issues to often-used known-in-advance
+websites/services that get blocked on either side of the route to them
+(by either state censorship or geo-blocking), without running all traffic
+through tunnels unnecessarily, and without manually configuring proxies/tunnels
+in specific apps.
 
 List of handled hostnames is supposed to be maintained manually,
 with script issuing notifications when those don't need to be on the list anymore,
@@ -39,75 +43,176 @@ running with more access to update `nftables sets`_, `ip-route tables`_,
 It'd also make sense to use reasonably secure/private DNS resolution
 alongside this tool - see `DNS Privacy project`_ for more info on that.
 
+Scripts here are not intended to do any tricks to fool DPI, discard RST
+packets or otherwise work around specific censorshit types and implementations,
+just route stuff around whatever, whereever or by-whomever it is.
+
+Doesn't use any pre-made/updated lists like adblockers and such do,
+but can be used to produce one.
+
+If you don't want to run traffic over tunnels, and/or trying to bypass specific
+national firewalls, lookup tools like GreenTunnel_, GoodbyeDPI_, PowerTunnel_ or
+zapret_ instead.
+
 .. _nftables sets: https://wiki.nftables.org/wiki-nftables/index.php/Sets
 .. _ip-route tables: https://man.archlinux.org/man/ip-route.8.en
 .. _ip-rules: https://man.archlinux.org/man/ip-rule.8.en
 .. _DNS Privacy project: https://dnsprivacy.org/
+.. _GreenTunnel: https://github.com/SadeghHayeri/GreenTunnel
+.. _GoodbyeDPI: https://github.com/ValdikSS/GoodbyeDPI
+.. _PowerTunnel: https://github.com/krlvm/PowerTunnel
+.. _zapret: https://github.com/bol-van/zapret
 
 
 Routing policy decision-making logic
 ------------------------------------
 
-Some less-obvious quirks of availability-checking done by the script are listed below.
+General idea and some less-obvious quirks of availability-checking
+done by the script are listed below.
 
-- Service DNS names are expected to have multiple IPs, which change anytime,
+
+- Whole tool can be decomposed into following parts:
+
+  - Local sqlite db file, storing all service availability and checks info.
+
+  - Service availability checking backend.
+
+    Selects/rate-limits/schedules which checks to run and runs them,
+    where each check can be split in two parts:
+
+    - DNS resolution to an ever-changing list of cloud IPs.
+
+    - Probing individual DNS name + IPv4/IPv6 address combinations via curl or such.
+
+  - Actions on availability changes.
+
+    - Applying re-routing workarounds "policy", via separate script,
+      which might need additional privileges to e.g. manipulate host's nftables.
+
+    - Applying DNS workarounds/overrides.
+
+  - Separate glue script(s) updating routing policies or DNS zones,
+    called from actions above.
+
+  It's useful to think about these concepts/components separately like that,
+  to talk about them in relative isolation, as is mostly done below.
+
+
+- DNS parts can be tricky.
+
+  Service DNS names are expected to resolve to multiple IPs, which change anytime,
   as CDNs hand them out randomly depending on time, place, load, phase of the
   moon or whatever.
 
-  So service/host address-set-to-check is built from all addrs that were seen for
-  it during checks within some reasonable timeframe, like a couple days.
+  This introduces a problem that apps can use different IP from checked ones,
+  unless either some DNS hack is introduced, or checks are run sufficiently often
+  and remember/re-route old IPs if those get handed-out in a round-robin fashion.
 
-  I.e. if currently handed-out IP addr worked, and ones that were during earlier
-  checks didn't, doesn't mean that browser or some other app will use same address,
-  so that whole "recently seen" superset is checked to determine if host is being
-  blocked, not just the latest subset of IPs.
+  So, DNS resolution for a particular site/service can be handled in following ways:
 
-- Both IPv4/IPv6 are supported, and host is considered to be working directly if
-  ALL addrs within ONE OF these address families work.
+  - Not altered, if its IPs are stable enough, they're checked often enough
+    and/or with enough history, or just hitting occasional unchecked/blocked one
+    is not a big deal.
 
-  Idea here is kinda similar to `Happy Eyeballs algorithm`_.
+  - Limit service to checked/rerouted IPs.
 
-  IPv6 quite often doesn't work for a service with arbitrary connection errors
-  (refused, reset, timeout, etc), while IPv4 works perfectly fine, which is normal
-  for a lot of sites (as of 2022 at least), so not insisting on IPv6 is fine.
+    Safe opposite to above, to have apps use maybe slightly-stale addrs that
+    were confirmed to work, one way or another.
 
-  But IPv4 can fail to work while IPv6 works due to broken filtering too,
-  where either blocking is too narrow/static and site works around it by shifting
-  its IPv6 constantly or IPv6 AF is just not filtered at all.
+  - Limit service to IPs that were checked and confirmed to be working directly,
+    maybe even older ones from earlier queries (if host rotates returned IPs).
 
-  .. _Happy Eyeballs algorithm: https://datatracker.ietf.org/doc/html/rfc6555
+    Useful for high-traffic or latency-sensitive services, where
+    poorly-implemented censorshit laws block random IPs from the pool,
+    resulting in stuff occasionally timing-out at random, but tunneling it
+    can be less convenient/slow/costly than just dropping these unlucky addrs.
 
-- Default checks ("https") are not just ICMP pings or TCP connections,
+  When some form of DNS override/filtering is in place, script can be used
+  with ``-Z/--unbound-zone-for`` option to export records for that at any time,
+  selecting strategies from the list above on per-host or per-run basis.
+
+  Option dumps local-zone info to stdout (in Unbound_ resolver format),
+  filtered by regexp for hostname(s) and any policy modifiers.
+  Using larger superset of "all seen" addresses can be useful to schedule
+  these updates less often, and not bother tracking upstream results exactly.
+
+
+- Enabling workarounds on failed connection checks can be done in different ways too.
+
+  - Reroute all old-and-current service IPs if any/some/all of them are
+    confirmed to be blocked.
+
+    It's useful to have longer grace periods or run alt-route checker here,
+    to avoid flapping workarounds on/off whenever services have any common
+    temporary issues on any of their endpoints.
+
+  - Same as above, but re-route specific address family (IPv4/IPv6),
+    when IPs in there are detected to be inaccessible.
+
+    This takes into account the fact that censorship is often simple,
+    and applies to a list of some IPv4 ranges only, as well as the fact
+    that IPv6 often gets broken on its own, so it's useful to treat these
+    AFs and their specific issues separately.
+
+    Idea is kinda similar to `Happy Eyeballs algorithm`_, which is widely used
+    when establishing connections with both IPv4/IPv6 options available.
+
+    .. _Happy Eyeballs algorithm: https://datatracker.ietf.org/doc/html/rfc6555
+
+  - Reroute/tunnel only blocked-somewhere IPs that don't pass the checks.
+
+    Can be a smart way to do it with larger CDNs or an even dumber censorshit.
+
+  - Forego routing workarounds entirely in favor of some other solution.
+    DNS workarounds (filtering-out blocked addrs) or notifications for something
+    manual, for example.
+
+  These strategies can be toggled via global ``-p/--check-list-default-policy``
+  option and set on a per-service/host basis to handle different things differently.
+
+  For small or known-blocked sites it can be easier to have broad "reroute it all"
+  policies, but might not be worth clogging the tunnel with all cloudflare, youtube
+  or twitch.tv video traffic at all, and only work around issues there on the DNS level,
+  if possible.
+
+
+- Checking "hostname + address" combination tends to be special for each host.
+
+  Default checks ("https") are not just ICMP pings or TCP connections,
   but a curl page fetch, expecting specific http response codes,
   to catch whatever mid-https RST packets (often for downgrade to ISP's http
   blacklist page) and hijacking with bogus certs, which seem to be common for
   censorship-type filtering situation.
 
-  It's possible to further customize which response code is expected by using
-  e.g. "api.twitter.com=404", where providing domain that returns 200 is tricky
-  or default redirect responses are known to indicate failure.
+  It's useful to check and customize which response code is expected by using
+  e.g. "api.twitter.com=404" or query specific URL paths that return specific
+  http results, e.g. "somesite.com:https/api/v5=400", especially if generic
+  redirect responses are known to indicate access failure (leading to either
+  censorshit or a F-U page).
 
-- Service availability check on specific address consists of two parts -
-  checking it via direct connection, and checking it via alternate route.
 
-  This is done so that this tool doesn't just track general upstream up/down
-  status, but only marks things as needing a workaround when it legitimately
-  works that way, unlike direct connection.
+- Good service availability check for specific address consists of two parts -
+  checking it via direct connection, and checking it via alternate route that's
+  supposed to be used as a workaround.
 
-- State of the host only changes after a grace period, to avoid flapping between
-  routes needlessly during whatever temporary issues, like maybe service being down
-  in one geo-region for a bit.
+  This is done so that checks don't just track general upstream up/down status,
+  but only mark things as needing workaround when it legitimately works that way,
+  unlike direct connection.
 
-  Both directions have different timeouts - flipping to workaround state is faster
-  than back to direct connections, to prioritize working routes over responsiveness.
 
-- These rules/decisions assume a bias towards indirect connection being more
-  reliable than direct one, as this is not a generic availability-failover tool,
-  but one intended specifically for working around bad restrictions on "native" IPs.
+- State of hosts in db only gets changed after a grace period(s), to avoid
+  flapping between routes needlessly during whatever temporary issues, like
+  maybe service being down in one geo-region or on some frontend IPs for a bit.
 
-  It's easy to flip the rules around however, by running "native" and "indirect"
-  parts of the script with their routing policies reversed, and layer results from
-  that on top of direct checks at the firewall level with some basic precedence logic.
+  Both directions have different timeouts and transition rules - e.g. flipping
+  to workaround state is faster than back to direct connections by default,
+  and is done through intermediate "failing" state, with possible alt-route
+  checks in-between, to stall the transition if endpoint seem to be down from
+  both network perspectives.
+
+  All timeouts, intervals and delays are listed in ``-h/--help`` output and are
+  easily configurable.
+
 
 - Non-global/public addrs (as in iana-ipv4/ipv6-special-registry) are ignored in
   getaddrinfo() results for all intents and purposes, to avoid hosts assigning
@@ -167,13 +272,46 @@ Check list file format
 
 Should be a space/newline-separated list of hostnames to check.
 
-Each spec can be more than just hostname: ``hostname[:check][=expected-result]``
+Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-result]``
 
 - ``hostname`` - hostname or address to use with getaddrinfo() for each check.
 
   It almost always makes sense to only use names for http(s) checks, as sites
   tend to change IPs, and names are required for https, SNI and proper vhost
   responses anyway.
+
+- ``policy`` - how to combine conflicting check results for different host addresses.
+
+  This value should look like ``reroute-policy.dns-flags``, where both
+  dot-separated parts are optional.
+
+  ``reroute-policy`` can be one of the following values:
+
+  - ``af-any`` - host considered ok if all addrs on either IPv4 or IPv6 address family (AF) are okay.
+  - ``af-all`` - any blocked addr on any AF = host considered N/A.
+  - ``af-pick`` - reroute all addrs of AF(s) that have any of them blocked.
+  - ``pick`` - reroute individual addrs that appear to be blocked, instead of per-host/AF policy.
+  - ``noroute`` - always return same "ok" for routing policy purposes.
+
+  XXX: selecting these are not implemented yet, script uses hardcoded ``af-any`` logic.
+
+  ``dns-flags`` part is a combination of any number of one-char DNS-filtering
+  flags from the following list:
+
+  - ``4`` - only resolve and use/check IPv4 A records/addrs for host.
+  - ``6`` - only resolve/use/check IPv6 AAAA addresses.
+  - ``D`` - print only records for directly-accessible addrs of this host.
+  - ``R`` - only print records for inaccessible/rerouted addrs.
+  - ``L`` - print only latest records IPs from last getaddrinfo() for host, not any earlier ones.
+
+  Where "print" flags are only relevant when using ``-Z/--unbound-zone-for`` option.
+
+  Any combination of these should work - for example: ``pick.6``, ``LD4``,
+  ``af-all``, ``af-pick.RL`` - but using some DNS flags like ``46`` together
+  makes them negate each other.
+
+  Default value is ``af-any``.
+  Can be changed via ``-p/--check-list-default-policy`` script option.
 
 - ``check`` - type of check to run.
 
@@ -194,6 +332,14 @@ Simple Example::
   twitter.com
   abs.twimg.com=400 api.twitter.com=404 # some endpoints don't return 200
 
+  ## Random other check-type examples
+  oldsite.com:http
+  fickle-site.net=200/503
+  httpbin.org:https/status/478=478
+
+  ## Policy example
+  abcdefg.cloudfront.net>LD:https/api=200
+
 These config files can be missing, created, removed or changed on the fly,
 with their mtimes probed on every check interval, and contents reloaded as needed.
 
@@ -203,8 +349,8 @@ At least one ``-f/--check-list-file`` option is required, even with nx path.
 Setup example with linux policy routing
 ---------------------------------------
 
-Relatively simple way to get this tool to control network is to have it run on
-some linux router box and tweak its routing logic directly for affected IPs,
+Relatively simple way to get this tool to control network is to have it run
+on some linux router box and tweak its routing logic directly for affected IPs,
 routing traffic to those through whatever tunnel, for example.
 
 This is generally called "Policy Routing", and can be implemented in a couple
@@ -437,7 +583,7 @@ Related links, tips, info and trivia
   of known/managed hostnames (can be just ``-Z.`` to dump all of them).
 
   Output produced there can be used with `Unbound`_'s (DNS resolver/cache
-  daemon) ``include:`` directive, or parsed as YAML_ for any other local resolver.
+  daemon) ``include:`` directive, or parsed/converted for other local resolvers.
   Should probably be scheduled via systemd timer
   (with e.g. ``StandardOutput=truncate:...`` line) or crontab.
 
@@ -446,7 +592,6 @@ Related links, tips, info and trivia
   resolv.conf file (pointing to unrestricted resolver) into its systemd service/container.
 
   .. _Unbound: https://unbound.docs.nlnetlabs.nl/
-  .. _YAML: https://en.wikipedia.org/wiki/YAML
 
 - While intended to work around various network disruptions, this stuff can also
   be used in the exact opposite way - to detect when specific endpoints are
@@ -454,6 +599,10 @@ Related links, tips, info and trivia
   undesirable (instead of "na", adding blocking rules), e.g. in a pihole_-like scenario.
 
   .. _pihole: https://pi-hole.net/
+
+- `test.sh <test.sh>`_ script can be used to easily check or create any oddball
+  blocking-over-time scenarios and see how logic of the tool reacts to those,
+  coupled with specific configuration or any local code tweaks, and is full of examples.
 
 - `"Dynamic policy routing to work around internet restrictions" blog post`_
   with a bit more context and info around this script.
