@@ -710,6 +710,28 @@ test_block_reroute_policy_afany 550
 rm -f "$db"; echo >"$chks" 'test>af-any'
 test_block_reroute_policy_afany 600
 
+rm -f "$db"; echo >"$chks" 'test'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run_opts+=( -p af-all ); test_run 648
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+rm -f "$db"; echo >"$chks" 'test>af-any'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run_opts+=( -p af-all ); test_run 649
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
 # policy = af-all
 
 rm -f "$db"; echo >"$chks" 'test>af-all'
@@ -874,7 +896,7 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 
 rm -f "$db"; echo >"$chks" 'test>noroute'
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4=0'
-test_run 830
+test_run_opts+=( -p af-all ); test_run 830
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https

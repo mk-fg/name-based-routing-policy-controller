@@ -44,7 +44,7 @@ def ts_now():
 class NBRPConfig:
 	_p = pl.Path(__file__)
 
-	host_files = list()
+	host_files, host_policy_default = list(), None
 	db_file = pl.Path(_p.name.removesuffix('.py') + '.db')
 	db_debug, db_lock_timeout = False, 60
 	curl_cmd = 'curl'
@@ -137,9 +137,11 @@ class NBRPDB:
 		# policy string for dns queries and processing check results
 		'alter table hosts add column policy text null;' ]
 
-	def __init__(self, path, lock_timeout=60, lazy=False, debug=False):
+	def __init__( self, path,
+			policy_default=None, lock_timeout=60, lazy=False, debug=False ):
 		import sqlite3
 		self._sqlite, self._ts_activity, self.debug = sqlite3, 0, debug
+		self._chk_policy = lambda p: p and chk_policy(p) or policy_default
 		self._db_kws = dict( database=path,
 			isolation_level='IMMEDIATE', timeout=lock_timeout )
 		if not lazy: self._db_init()
@@ -242,7 +244,8 @@ class NBRPDB:
 			c.execute( 'select host, state, chk, policy from hosts'
 				f' where {chk} order by ts_check limit ?', (val, n) )
 			return list(
-				self._host_check(chk_tuple(chk), chk_policy(policy), host, self._st_val(s))
+				self._host_check( chk_tuple(chk),
+					self._chk_policy(policy), host, self._st_val(s) )
 				for host, s, chk, policy in c.fetchall() )
 
 	def host_update(self, ts, host, addrs=list(), addr_timeout=None, addr_limit=None):
@@ -284,7 +287,7 @@ class NBRPDB:
 				f' from addrs join hosts using (host) where {chk}'
 				' order by addrs.ts_check limit ?', (*chk_vals, n) )
 			return list(
-				self._addr_check( chk_tuple(chk), chk_policy(policy),
+				self._addr_check( chk_tuple(chk), self._chk_policy(policy),
 					host, self._st_val(sh), ip.ip_address(addr), self._st_val(sa) )
 				for chk, policy, host, sh, addr, sa in c.fetchall() )
 
@@ -334,12 +337,13 @@ class NBRPDB:
 				' from addrs join hosts using (host)'
 				f' where host in ({hs_tpl}) order by host', tuple(hs) )
 			for host, host_tuples in it.groupby(c.fetchall(), key=op.itemgetter(0)):
-				sas, hp = (set(), set()), None
-				for host, chk, hp, addr, ts_upd, shs, sa, ts_au, ts_ad in host_tuples:
+				sas, policy = (set(), set()), None
+				for host, chk, policy, addr, ts_upd, shs, sa, ts_au, ts_ad in host_tuples:
 					if ts_ad >= ts_au: sa = None; st_updates['unstable'].add(host)
 					else: sa = self._st_val(sa)
 					sas[':' not in addr].add(sa)
-				sa, sh, td_upd, policy = None, self._st_val(shs), ts - ts_upd, chk_policy(hp)
+				sa, sh, td_upd = None, self._st_val(shs), ts - ts_upd
+				policy = self._chk_policy(policy)
 
 				# "Pick" policies don't really need per-host state, only set it for logging/clarity
 				if policy.af_any:
@@ -364,7 +368,7 @@ class NBRPDB:
 					if not sa:
 						if shs == 'ok': st_updates['failing'].add(host); continue
 						elif td_upd < td_na: continue # delays failing/unstable -> na transition
-					changes.append(self._policy_host_upd(chk_tuple(chk), hp, host, sh, sa))
+					changes.append(self._policy_host_upd(chk_tuple(chk), policy, host, sh, sa))
 					st_updates[self._st_str(sa)].add(host)
 				elif sa and shs not in ['ok', 'na']: st_updates['ok'].add(host) # failing/unstable -> ok
 
@@ -393,7 +397,7 @@ class NBRPDB:
 				' where addr not null order by host, addr like ?, addr', ('%:%',) )
 			st = self._st_val if not st_raw else lambda v: v
 			return list(
-				self._policy_line( chk_tuple(chk), chk_policy(p),
+				self._policy_line( chk_tuple(chk), self._chk_policy(p),
 					host, st(s), s_ts, ip.ip_address(addr), st(sa), sa_ts, sa_tsl )
 				for host, chk, p, s, s_ts, addr, sa, sa_ts, sa_tsl in c.fetchall() )
 
@@ -407,7 +411,7 @@ class NBRPC:
 	def close(self):
 		if self.db: self.db = self.db.close()
 	def __enter__(self):
-		self.db = NBRPDB( self.conf.db_file,
+		self.db = NBRPDB( self.conf.db_file, self.conf.host_policy_default,
 			lock_timeout=self.conf.db_lock_timeout, debug=self.conf.db_debug )
 		self.host_map = None
 		return self
@@ -963,6 +967,7 @@ def main(args=None, conf=None):
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
 	conf.update_all, conf.update_sync = opts.update_all, opts.sync_on_start
 	conf.update_host, conf.update_n = opts.update_host, opts.force_n_checks
+	conf.host_policy_default = chk_policy(opts.check_list_default_policy)
 	for pre, kvs, opt in ( ('td_', opts.interval, '-i/--interval'),
 			('timeout_', opts.timeout, '-t/--timeout'), ('limit_', opts.limit, '-l/--limit') ):
 		for kv in kvs:
