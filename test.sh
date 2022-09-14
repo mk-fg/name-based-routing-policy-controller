@@ -45,13 +45,14 @@ test_run_cmd=(
 	-i host-na-state=500 # <10min, grace period for na->ok transition
 	-i host-ok-state=1000 # <20min, same for ok->na
 	-t host-addr=5000 # <100min, to forget not-seen dns addr
-	-SUn9999 -x- "${opts[@]}" ) # -n disables other intervals
+	-SUn9999 "${opts[@]}" ) # -n disables other intervals
+test_run_out=( -x- )
 test_run_opts=()
 test_run() {
 	[[ -z "$1" ]] || ts=$1
 	[[ -z "$2" ]] && ts_sec=0 || ts_sec=$2
 	NBRPC_TEST_TS=$(($ts * 61 + $ts_sec)) \
-	"${test_run_cmd[@]}" "${test_run_opts[@]}" >"$tmpdir"/out.txt
+	"${test_run_cmd[@]}" "${test_run_out[@]}" "${test_run_opts[@]}" >"$tmpdir"/out.txt
 	test_run_opts=(); }
 test_policy() { "${test_run_cmd[@]}" -P >"$tmpdir"/out.txt; }
 
@@ -125,7 +126,7 @@ test_run 2 20
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https -failing- @ 2001-09-09.01:47]:
-  0.0.0.1 :: [2001-09-09.01:47] na
+ *0.0.0.1 :: [2001-09-09.01:47] na
   0.0.0.2 :: [2001-09-09.01:46] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
@@ -135,8 +136,8 @@ test_run 3
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.01:49]:
+ *0.0.0.2 :: [2001-09-09.01:46] ok
   0.0.0.1 :: [2001-09-09.01:49] ok
-  0.0.0.2 :: [2001-09-09.01:46] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -226,7 +227,7 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.03:48]:
-  0.0.0.1 :: [2001-09-09.03:48] ok
+ *0.0.0.1 :: [2001-09-09.03:48] ok
   0.0.0.3 :: [2001-09-09.03:48] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
@@ -238,7 +239,7 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.04:09]:
-  0.0.0.1 :: [2001-09-09.03:48] ok
+ *0.0.0.1 :: [2001-09-09.03:48] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -279,9 +280,9 @@ echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0 test@0.0.0.3'
 test_run 201; test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https -failing- @ 2001-09-09.05:11]:
-  0.0.0.1 :: [2001-09-09.05:11] na
-  0.0.0.2 :: [2001-09-09.05:11] na
-  0.0.0.3 :: [2001-09-09.05:10] ok
+ *0.0.0.1 :: [2001-09-09.05:11] na
+ *0.0.0.2 :: [2001-09-09.05:11] na
+ *0.0.0.3 :: [2001-09-09.05:10] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -290,9 +291,9 @@ echo >"$run" '0.0.0.1 test@0.0.0.2=0 test@0.0.0.3=0'
 test_run_opts+=( -F ); test_run 207; test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https -failing- @ 2001-09-09.05:11]:
-  0.0.0.1 :: [2001-09-09.05:11] na
-  0.0.0.2 :: [2001-09-09.05:11] na
-  0.0.0.3 :: [2001-09-09.05:10] ok
+ *0.0.0.1 :: [2001-09-09.05:11] na
+ *0.0.0.2 :: [2001-09-09.05:11] na
+ *0.0.0.3 :: [2001-09-09.05:10] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -300,9 +301,9 @@ echo >"$run" '0.0.0.1=0 test@0.0.0.2=0 test@0.0.0.3'
 test_run 211; test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.05:21]:
+ *0.0.0.2 :: [2001-09-09.05:11] na
+ *0.0.0.3 :: [2001-09-09.05:10] ok
   0.0.0.1 :: [2001-09-09.05:11] na
-  0.0.0.2 :: [2001-09-09.05:11] na
-  0.0.0.3 :: [2001-09-09.05:10] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -312,8 +313,8 @@ test_run_opts+=( -F ); test_run 299
 test_run 300; test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.05:21]:
-  0.0.0.2 :: [2001-09-09.05:11] na
-  0.0.0.3 :: [2001-09-09.05:10] ok
+ *0.0.0.2 :: [2001-09-09.05:11] na
+ *0.0.0.3 :: [2001-09-09.05:10] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -326,8 +327,8 @@ echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2=0 0.0.0.3'
 test_run 302; test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https -failing- @ 2001-09-09.06:53]:
-  0.0.0.1 :: [2001-09-09.06:53] na
-  0.0.0.2 :: [2001-09-09.06:53] na
+ *0.0.0.1 :: [2001-09-09.06:53] na
+ *0.0.0.2 :: [2001-09-09.06:53] na
   0.0.0.3 :: [2001-09-09.05:10] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
@@ -337,8 +338,8 @@ test_run_opts+=( -F ); test_run 308
 test_run 312; test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https /unstable/ @ 2001-09-09.07:03]:
-  0.0.0.1 :: [2001-09-09.06:53] na
-  0.0.0.2 :: [2001-09-09.06:53] na
+ *0.0.0.1 :: [2001-09-09.06:53] na
+ *0.0.0.2 :: [2001-09-09.06:53] na
   0.0.0.3 :: [2001-09-09.05:10] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
@@ -355,8 +356,8 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https /unstable/ @ 2001-09-09.08:34]:
-  0.0.0.1 :: [2001-09-09.06:53] na
-  0.0.0.2 :: [2001-09-09.06:53] na
+ *0.0.0.1 :: [2001-09-09.06:53] na
+ *0.0.0.2 :: [2001-09-09.06:53] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -382,8 +383,8 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.08:44]:
-  0.0.0.1 :: [2001-09-09.08:44] ok
-  0.0.0.2 :: [2001-09-09.08:44] ok
+ *0.0.0.1 :: [2001-09-09.08:44] ok
+ *0.0.0.2 :: [2001-09-09.08:44] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -416,8 +417,8 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https /unstable/ @ 2001-09-09.09:03]:
-  0.0.0.1 :: [2001-09-09.08:54] na
-  0.0.0.2 :: [2001-09-09.08:54] na
+ *0.0.0.1 :: [2001-09-09.08:54] na
+ *0.0.0.2 :: [2001-09-09.08:54] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -486,9 +487,9 @@ rm -f "$db"; test_run 501
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.10:16]:
-  0.0.0.1 :: [2001-09-09.10:16] ok
-  0.0.0.2 :: [2001-09-09.10:16] na
-  1::3 :: [2001-09-09.10:16] ok
+ *0.0.0.1 :: [2001-09-09.10:16] ok
+ *0.0.0.2 :: [2001-09-09.10:16] na
+ *1::3 :: [2001-09-09.10:16] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -767,10 +768,10 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.13:38]:
-  0.0.0.1 :: [2001-09-09.13:38] ok
-  0.0.0.2 :: [2001-09-09.13:38] na
-  1::3 :: [2001-09-09.13:38] ok
-  1::4 :: [2001-09-09.13:38] ok
+ *0.0.0.1 :: [2001-09-09.13:38] ok
+ *0.0.0.2 :: [2001-09-09.13:38] na
+ *1::3 :: [2001-09-09.13:38] ok
+ *1::4 :: [2001-09-09.13:38] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -786,10 +787,10 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.13:38]:
-  0.0.0.1 :: [2001-09-09.13:38] ok
-  0.0.0.2 :: [2001-09-09.13:38] na
-  1::3 :: [2001-09-09.13:39] na
-  1::4 :: [2001-09-09.13:38] ok
+ *0.0.0.1 :: [2001-09-09.13:38] ok
+ *0.0.0.2 :: [2001-09-09.13:38] na
+ *1::3 :: [2001-09-09.13:39] na
+ *1::4 :: [2001-09-09.13:38] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -805,10 +806,10 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.13:38]:
-  0.0.0.1 :: [2001-09-09.13:38] ok
-  0.0.0.2 :: [2001-09-09.13:49] ok
-  1::3 :: [2001-09-09.13:49] ok
-  1::4 :: [2001-09-09.13:49] na
+ *0.0.0.1 :: [2001-09-09.13:38] ok
+ *0.0.0.2 :: [2001-09-09.13:49] ok
+ *1::3 :: [2001-09-09.13:49] ok
+ *1::4 :: [2001-09-09.13:49] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -824,10 +825,10 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.14:29]:
-  0.0.0.1 :: [2001-09-09.13:38] ok
-  0.0.0.2 :: [2001-09-09.13:49] ok
-  1::3 :: [2001-09-09.13:49] ok
-  1::4 :: [2001-09-09.14:29] ok
+ *0.0.0.1 :: [2001-09-09.13:38] ok
+ *0.0.0.2 :: [2001-09-09.13:49] ok
+ *1::3 :: [2001-09-09.13:49] ok
+ *1::4 :: [2001-09-09.14:29] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -846,10 +847,10 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.15:20]:
-  0.0.0.1 :: [2001-09-09.15:20] ok
-  0.0.0.2 :: [2001-09-09.15:20] ok
-  1::3 :: [2001-09-09.15:20] ok
-  1::4 :: [2001-09-09.15:20] na
+ *0.0.0.1 :: [2001-09-09.15:20] ok
+ *0.0.0.2 :: [2001-09-09.15:20] ok
+ *1::3 :: [2001-09-09.15:20] ok
+ *1::4 :: [2001-09-09.15:20] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -875,20 +876,20 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https blocked @ 2001-09-09.15:20]:
-  0.0.0.1 :: [2001-09-09.15:22] ok
-  0.0.0.2 :: [2001-09-09.15:20] ok
-  1::3 :: [2001-09-09.15:22] ok
-  1::4 :: [2001-09-09.15:21] ok
+ *0.0.0.1 :: [2001-09-09.15:22] ok
+ *0.0.0.2 :: [2001-09-09.15:20] ok
+ *1::3 :: [2001-09-09.15:22] ok
+ *1::4 :: [2001-09-09.15:21] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 test_run 820
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.15:40]:
-  0.0.0.1 :: [2001-09-09.15:22] ok
-  0.0.0.2 :: [2001-09-09.15:20] ok
-  1::3 :: [2001-09-09.15:22] ok
-  1::4 :: [2001-09-09.15:21] ok
+ *0.0.0.1 :: [2001-09-09.15:22] ok
+ *0.0.0.2 :: [2001-09-09.15:20] ok
+ *1::3 :: [2001-09-09.15:22] ok
+ *1::4 :: [2001-09-09.15:21] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -907,10 +908,10 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [https OK @ 2001-09-09.15:50]:
-  0.0.0.1 :: [2001-09-09.15:50] ok
-  0.0.0.2 :: [2001-09-09.15:50] na
-  1::3 :: [2001-09-09.15:50] ok
-  1::4 :: [2001-09-09.15:50] na
+ *0.0.0.1 :: [2001-09-09.15:50] ok
+ *0.0.0.2 :: [2001-09-09.15:50] na
+ *1::3 :: [2001-09-09.15:50] ok
+ *1::4 :: [2001-09-09.15:50] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -933,9 +934,9 @@ diff -u "$tmpdir"/out{.expected,}.txt
 test_policy
 cat >"$tmpdir"/out.expected.txt <<EOF
 test [dns OK @ 2001-09-09.16:10]:
-  0.0.0.1 :: [2001-09-09.16:10] ok
-  1::2 :: [2001-09-09.16:10] ok
-  1::3 :: [2001-09-09.16:10] ok
+ *0.0.0.1 :: [2001-09-09.16:10] ok
+ *1::2 :: [2001-09-09.16:10] ok
+ *1::3 :: [2001-09-09.16:10] ok
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 test_run_opts+=( -Z. ); test_run 851
@@ -944,6 +945,250 @@ local-zone: test. static
 local-data: 'test A 0.0.0.1'
 local-data: 'test AAAA 1::2'
 local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+}
+
+
+## Policy-update output
+
+test_block_updates() {
+
+test_run_out_bak=( "${test_run_out[@]}" )
+test_run_out=( -X- )
+
+rm -f "$db"; echo >"$chks" test
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0'
+test_run 900
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 0.0.0.2'
+test_run 901
+: >"$tmpdir"/out.expected.txt
+diff -u "$tmpdir"/out{.expected,}.txt
+echo >"$run" 'test@0.0.0.1=0 0.0.0.2'
+test_run 902
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1=0 0.0.0.2 test@1::3'
+test_run 903
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 1::3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 0.0.0.2 test@1::3'
+test_run 904
+: >"$tmpdir"/out.expected.txt
+diff -u "$tmpdir"/out{.expected,}.txt
+
+test_run 925
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.17:27]:
+ *0.0.0.1 :: [2001-09-09.17:05] ok
+ *1::3 :: [2001-09-09.17:04] ok
+  0.0.0.2 :: [2001-09-09.17:02] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# policy=af-pick should update rules without host state updates
+
+rm -f "$db"; echo >"$chks" 'test>af-pick'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3'
+test_run 929
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3=0'
+test_run 930
+: >"$tmpdir"/out.expected.txt
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3=0 test@1::4'
+test_run 931
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+# policy=af-pick AFs flip instantly
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3=0 test@1::4'
+test_run 940
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
+test_run 941
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::3 https
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+echo >"$run" '0.0.0.1 test@0.0.0.2=0 test@1::3 1::4'
+test_run 942
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+# policy=af-pick AFs flips don't reset host grace period
+echo >"$run" '0.0.0.1 test@0.0.0.2 test@1::3 1::4'
+test_run 943
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.17:42]:
+ *0.0.0.2 :: [2001-09-09.17:45] ok
+ *1::3 :: [2001-09-09.17:44] ok
+  0.0.0.1 :: [2001-09-09.17:31] ok
+  1::4 :: [2001-09-09.17:33] ok
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+test_run 944
+: >"$tmpdir"/out.expected.txt
+diff -u "$tmpdir"/out{.expected,}.txt
+echo >"$run" '0.0.0.1 0.0.0.2 test@0.0.0.5=0 1::3 1::4'
+test_run 945
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 0.0.0.5 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+# policy=pick always updates specific addrs
+
+rm -f "$db"; echo >"$chks" 'test>pick'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3'
+test_run 950
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+na test 0.0.0.2 https
+ok test 1::3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3=0'
+test_run 951
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.2 https
+na test 1::3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3'
+test_run 952
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 1::3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run 953
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+test_run_out=( "${test_run_out_bak[@]}" )
+}
+
+
+## "Use last getaddrinfo() for host state" flag
+
+test_block_gai_last() {
+
+rm -f "$db"; echo >"$chks" 'test>1'
+
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2'
+test_run 1000
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 0.0.0.2=0 test@0.0.0.3'
+test_run 1001
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 0.0.0.3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https OK @ 2001-09-09.18:43]:
+ *0.0.0.1 :: [2001-09-09.18:43] ok
+ *0.0.0.3 :: [2001-09-09.18:44] ok
+  0.0.0.2 :: [2001-09-09.18:44] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+test_run 1010
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 0.0.0.3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+test_run 1010
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 0.0.0.3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+
+echo >"$run" 'test@0.0.0.1 0.0.0.2=0 test@0.0.0.3=0'
+test_run 1011; test_run 1020
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 0.0.0.3 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.19:03]:
+ *0.0.0.1 :: [2001-09-09.18:43] ok
+ *0.0.0.3 :: [2001-09-09.18:54] na
+  0.0.0.2 :: [2001-09-09.18:44] na
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
@@ -961,5 +1206,7 @@ test_block_zone
 test_block_zone_policy
 test_block_reroute_policy
 test_block_type_dns
+test_block_updates
+test_block_gai_last
 
 err=0 # success for all tests above

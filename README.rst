@@ -309,6 +309,7 @@ Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-
   - ``D`` - print only records for directly-accessible addrs of this host.
   - ``N`` - only print records for inaccessible/rerouted addrs.
   - ``L`` - print only latest records IPs from last getaddrinfo() for host, not any earlier ones.
+  - ``1`` - only take addrs from last getaddrinfo() into account for updating host state.
   - ``R`` - always print records in a random (shuffled) order.
 
   Where "print" flags are only relevant when using ``-Z/--unbound-zone-for`` option.

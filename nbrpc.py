@@ -72,10 +72,13 @@ class NBRPConfig:
 	limit_addrs_per_host = 18 # max last-seen IPs to track for each hostname
 
 
+### Parsers and structs for translating check-list strings
+
 host_file = cs.namedtuple('HostsFile', 'p mtime hosts')
 host_info = cs.namedtuple('HostInfo', 'host chk policy') # strings for db
 host_policy = cs.namedtuple( 'HostPolicy',
-	'af_any af_all af_pick pick noroute dns_af dns_st dns_last dns_shuf' )
+	'af_any af_all af_pick pick noroute'
+	' dns_af dns_st dns_last dns_last_chk dns_shuf' )
 host_check = cs.namedtuple('Check', 's ext res svc')
 
 def chk_parse(spec) -> host_info:
@@ -97,17 +100,78 @@ def chk_tuple(chk) -> host_check:
 	return host_check(s, chk, res, svc)
 
 def chk_policy(spec) -> host_policy:
-	if not spec: return host_policy(True, *[False]*4, 0, None, *[False]*2)
+	if not spec: return host_policy(True, *[False]*4, 0, None, *[False]*3)
 	if '.' in spec: route, dns = spec.split('.', 1)
-	elif not set(spec).difference('46DNLR'): route, dns = 'af_any', spec
+	elif not set(spec).difference('46DNL1R'): route, dns = 'af_any', spec
 	else: route, dns = spec, ''
-	v4, v6, ok, na, last, shuf = (k in dns for k in '46DNLR')
+	v4, v6, ok, na, last_chk, last_print, shuf = (k in dns for k in '46DNL1R')
 	dns_af = [socket.AF_INET, socket.AF_INET6][v6] if v4^v6 else 0
 	try: route = host_policy._fields.index(route.lower().replace('-', '_'))
 	except ValueError: raise LookupError(f'Unrecognized reroute-policy: {route!r}')
-	return host_policy(*it.chain(
-		(n == route for n in range(5)), [dns_af, ok if ok^na else None, last, shuf] ))
+	return host_policy(*it.chain( (n == route for n in range(5)),
+		[dns_af, ok if ok^na else None, last_chk, last_print, shuf] ))
 
+
+### Rerouting policy logic
+
+def policy_host_state(p, sas4_old, sas6_old, sas4, sas6):
+	'Translates per-AF address tri-states to True/False/None host state.'
+	if not p.dns_last_chk: sas4.update(sas4_old); sas6.update(sas6_old)
+	sa = None
+	if p.af_any:
+		for saf in sas4, sas6:
+			if False in saf: sa = False
+			elif True in saf: sa = True; break # any AF all-good = host all-good
+	elif p.af_all or p.af_pick:
+		for saf in sas4, sas6:
+			if False in saf: sa = False; break # any AF not all-good = na state
+			elif True in saf: sa = True
+	elif p.pick or p.noroute:
+		# "Pick" policies only use per-host state for logging/clarity
+		sas = sas4 | sas6
+		if p.noroute and sas: sa = True
+		if p.pick: sa = False not in sas # any blocked = na
+	else: raise ValueError(f'Unknown routing policy value: {p}')
+	return sa
+
+def policy_host_updates(hosts, addr_checks):
+	'Returns host-addrs to pick for updates, with no addrs = all addrs for host.'
+	host_updates = cs.defaultdict(set)
+	for h in hosts: host_updates[h] = set() # timed updates
+	for chk in addr_checks:
+		if chk.p.pick or chk.p.noroute: host_updates[chk.host].add(chk.addr)
+		elif not chk.p.dns_last_chk or chk.addr_last:
+			if chk.p.af_pick:
+				if chk.host not in hosts and chk.host_st is True: # all-ok -> all-ok
+					if chk.state is None: host_updates[chk.host].add(chk.addr) # new addr
+				else: host_updates[chk.host].clear() # cal flip all addr states w/o host state changes
+			elif chk.host not in hosts and chk.state is None:
+				host_updates[chk.host].add(chk.addr) # new addr
+			# XXX: addr-rules are never cleaned-up by policy updates - maybe fix that
+	return dict(host_updates)
+
+policy_info = cs.namedtuple('PolicyInfo', 'host state policy chk addr_sts')
+def policy_dump(pis):
+	lines = list()
+	for pi in pis:
+		if pi.policy.af_any or pi.policy.af_all:
+			addr_sts = dict((a, pi.state) for a in pi.addr_sts)
+		elif pi.policy.noroute:
+			addr_sts = dict((a, True) for a in pi.addr_sts)
+		elif pi.policy.af_pick:
+			if pi.state: addr_sts = dict((a, True) for a in pi.addr_sts) # host=ok grace period
+			else:
+				afs = set(a.version for a, ast in pi.addr_sts.items() if ast is False)
+				addr_sts = dict((a, a.version not in afs) for a in pi.addr_sts)
+		elif pi.policy.pick:
+			addr_sts = dict( (a, ast) for a, ast
+				in pi.addr_sts.items() if ast is not None )
+		lines.extend( f'{ast} {pi.host} {addr} {pi.chk}\n' for addr, ast in
+			sorted((a.compressed, ast and 'ok' or 'na') for a, ast in addr_sts.items()) )
+	return ''.join(lines).encode()
+
+
+### DB ORM layer
 
 class NBRPDB:
 	_db = _tx = None
@@ -141,7 +205,7 @@ class NBRPDB:
 			policy_default=None, lock_timeout=60, lazy=False, debug=False ):
 		import sqlite3
 		self._sqlite, self._ts_activity, self.debug = sqlite3, 0, debug
-		self._chk_policy = lambda p: p and chk_policy(p) or policy_default
+		self._chk_policy = lambda p: chk_policy(p) if p else policy_default
 		self._db_kws = dict( database=path,
 			isolation_level='IMMEDIATE', timeout=lock_timeout )
 		if not lazy: self._db_init()
@@ -230,6 +294,7 @@ class NBRPDB:
 		# "failing" is a host state, same as "ok" except for alt-route checks
 		if not s or s == 'skipped': return None
 		elif s in ['ok', 'failing', 'unstable']: return True
+		elif not isinstance(s, str): raise ValueError(s)
 		else: return False
 
 	def _st_str(self, v):
@@ -255,9 +320,12 @@ class NBRPDB:
 
 			for addr in set(ip.ip_address(addr) for addr in addrs):
 				addr = addr.compressed
-				c.execute( 'insert or ignore into addrs'
-					' (host, addr, ts_seen) values (?, ?, ?)', (host, addr, ts) )
-				if not c.lastrowid:
+				c.execute('savepoint ins')
+				try:
+					c.execute( 'insert into addrs'
+						' (host, addr, ts_seen) values (?, ?, ?)', (host, addr, ts) )
+				except self._sqlite.IntegrityError:
+					c.execute('rollback to ins')
 					c.execute( 'update addrs set ts_seen = ?'
 						' where host = ? and addr = ?', (ts, host, addr) )
 					self._upd_check(c, host, addr)
@@ -271,7 +339,7 @@ class NBRPDB:
 				c.execute( 'delete from addrs where'
 					' host = ? and ts_seen < ?', (host, ts_cutoff) )
 
-	_addr_check = cs.namedtuple('AddrCheck', 't p host host_st addr state')
+	_addr_check = cs.namedtuple('AddrCheck', 't p host host_st addr addr_last state')
 	def addr_checks(self, ts_max, n, failing=False, force_host=None):
 		with self() as c:
 			if force_host: chk, chk_vals = 'host = ?', [force_host]
@@ -282,14 +350,15 @@ class NBRPDB:
 			if failing:
 				chk += ' and hosts.state in (?, ?)'
 				chk_vals.extend(['failing', 'unstable'])
-			c.execute( 'select'
-					' chk, policy, host, hosts.state, addr, addrs.state'
-				f' from addrs join hosts using (host) where {chk}'
+			c.execute(
+				'with tsl as (select host, max(ts_seen) as tsl from addrs group by host)'
+				'select chk, policy, host, hosts.state, addr, ts_seen = tsl, addrs.state'
+				f' from addrs join hosts using (host) join tsl using (host) where {chk}'
 				' order by addrs.ts_check limit ?', (*chk_vals, n) )
 			return list(
 				self._addr_check( chk_tuple(chk), self._chk_policy(policy),
-					host, self._st_val(sh), ip.ip_address(addr), self._st_val(sa) )
-				for chk, policy, host, sh, addr, sa in c.fetchall() )
+					host, self._st_val(sh), ip.ip_address(addr), tsl, self._st_val(sa) )
+				for chk, policy, host, sh, addr, tsl, sa in c.fetchall() )
 
 	def addr_update(self, ts, host, addr, state0, state1):
 		with self() as c:
@@ -302,7 +371,7 @@ class NBRPDB:
 				' ts_down = case when ts_down >= ts_check then ts_update else 0 end,'
 				f' ts_check = ?{upd}  where host = ? and addr = ?', (ts, *upd_args, host, addr) )
 			self._upd_check(c, host, addr)
-			return self._st_val(state1)
+			return state1 and state1 is True
 
 	def addr_update_failing(self, ts, ac, ad):
 		with self() as c:
@@ -313,14 +382,8 @@ class NBRPDB:
 					f' addr in ({", ".join("?"*len(ast))}) and state != ?', (ts, *vals, *ast, 'ok') )
 				self._upd_check(c, ast, rc=len(ast))
 
-	def host_addr_states(self, host):
-		with self() as c:
-			c.execute( 'select addr, state from addrs'
-				' where host = ? order by addr like ?, addr', (host, '%:%') )
-			return dict((ip.ip_address(a), self._st_val(st)) for a, st in c.fetchall())
-
 	_policy_host_upd = cs.namedtuple('PolicyHostUpdate', 't p host state0 state')
-	def host_state_sync(self, ts, td_ok, td_na, host_iter):
+	def host_state_sync(self, ts, td_ok, td_na, hosts):
 		# Host state changes always bump ts_update, and go like this:
 		#  ??? -> [ok, na] ::
 		#  ok -[chk-fail]-> failing :: na (ts<now-td_ok) -[chk-ok]-> ok ::
@@ -330,35 +393,20 @@ class NBRPDB:
 		# Returns ok/blocked changes, without ok -> failing and such.
 		changes, st_updates = list(), cs.defaultdict(set)
 		with self() as c:
-			hs_tpl = ', '.join('?'*len(hs := set(host_iter)))
-			c.execute( 'select'
-					' host, chk, policy, addr, hosts.ts_update,'
-					' hosts.state, addrs.state, addrs.ts_update, addrs.ts_down'
-				' from addrs join hosts using (host)'
-				f' where host in ({hs_tpl}) order by host', tuple(hs) )
+			c.execute(
+				'with tsl as (select host, max(ts_seen) as tsl from addrs group by host)'
+				'select  host, chk, policy, addr, hosts.ts_update, hosts.state,'
+					' addrs.state, addrs.ts_update, addrs.ts_down, addrs.ts_seen = tsl'
+				' from addrs join hosts using (host) left join tsl using (host)'
+				f' where host in ({",".join("?"*len(hosts))}) order by host', tuple(hosts) )
 			for host, host_tuples in it.groupby(c.fetchall(), key=op.itemgetter(0)):
-				sas, policy = (set(), set()), None
-				for host, chk, policy, addr, ts_upd, shs, sa, ts_au, ts_ad in host_tuples:
+				sas, policy = (set(), set(), set(), set()), None
+				for host, chk, policy, addr, ts_upd, shs, sa, ts_au, ts_ad, ts_last in host_tuples:
 					if ts_ad >= ts_au: sa = None; st_updates['unstable'].add(host)
 					else: sa = self._st_val(sa)
-					sas[':' not in addr].add(sa)
-				sa, sh, td_upd = None, self._st_val(shs), ts - ts_upd
-				policy = self._chk_policy(policy)
-
-				# "Pick" policies don't really need per-host state, only set it for logging/clarity
-				if policy.af_any:
-					for saf in sas:
-						if False in saf: sa = False
-						elif True in saf: sa = True; break # any AF all-good = host all-good
-				elif policy.af_all or policy.af_pick:
-					for saf in sas:
-						if False in saf: sa = False; break # any AF not all-good = na state
-						elif True in saf: sa = True
-				elif policy.pick or policy.noroute:
-					sas = set(it.chain(*sas))
-					if policy.noroute and sas: sa = True
-					if policy.pick: sa = False not in sas # any blocked = na
-				else: raise ValueError(f'Unknown routing policy value: {policy}')
+					sas[ts_last*2 + (':' in addr)].add(sa)
+				sh, td_upd = self._st_val(shs), ts - ts_upd
+				sa = policy_host_state(policy := self._chk_policy(policy), *sas)
 
 				if sa != sh:
 					# log.debug(
@@ -386,21 +434,30 @@ class NBRPDB:
 
 	_policy_line = cs.namedtuple( 'PolicyLine',
 		't p host state state_ts addr addr_st addr_st_ts addr_last' )
-	def host_state_policy(self, st_raw=False):
+	def host_state_policy(self, hosts=None, addrs=None, st_raw=False):
 		with self() as c:
+			chk, chk_vals = '', list()
+			if hosts:
+				chk += 'and host in (' + ','.join('?'*len(hosts)) + ')'
+				chk_vals.extend(hosts)
+			if addrs:
+				chk += 'and addr in (' + ','.join('?'*len(addrs)) + ')'
+				chk_vals.extend(a.compressed for a in addrs)
 			c.execute(
-				'with tsl as ('
-					' select host, max(ts_seen) as tsl from addrs group by host )'
+				'with tsl as (select host, max(ts_seen) as tsl from addrs group by host)'
 				' select host, chk, policy, hosts.state, hosts.ts_update,'
 					' addr, addrs.state, addrs.ts_update, addrs.ts_seen = tsl'
-				' from hosts left join addrs using (host) left join tsl using (host)'
-				' where addr not null order by host, addr like ?, addr', ('%:%',) )
+				' from hosts left join addrs using (host) join tsl using (host)'
+				f' where addr not null {chk}'
+				' order by host, ts_seen != tsl, addr like ?, addr', (*chk_vals, '%:%') )
 			st = self._st_val if not st_raw else lambda v: v
 			return list(
 				self._policy_line( chk_tuple(chk), self._chk_policy(p),
 					host, st(s), s_ts, ip.ip_address(addr), st(sa), sa_ts, sa_tsl )
 				for host, chk, p, s, s_ts, addr, sa, sa_ts, sa_tsl in c.fetchall() )
 
+
+### Main check-runner daemon
 
 class NBRPC:
 
@@ -476,8 +533,8 @@ class NBRPC:
 				if not n:
 					print( f'\n{pl.host} [{pl.t.s}'
 						f' {st_map[pl.state]} @ {ts_fmt(pl.state_ts)}]:' )
-				line = ( f'  {pl.addr.compressed}'
-					f' :: [{ts_fmt(pl.addr_st_ts)}] {pl.addr_st or "???"}' )
+				line = ( ' ' + ' *'[pl.addr_last] + pl.addr.compressed
+					+ f' :: [{ts_fmt(pl.addr_st_ts)}] {pl.addr_st or "???"}' )
 				if len(line) > line_len: line = line[:line_len-3] + '...'
 				print(line)
 		print()
@@ -501,7 +558,7 @@ class NBRPC:
 				records.append(f"local-data: '{st.host} {rt} {st.addr.compressed}'")
 			if ap:
 				if ap.dns_shuf: random.shuffle(records)
-				for line in [f'\nlocal-zone: {st.host}. static'] + records: print(line)
+				for line in [f'\nlocal-zone: {st.host}. static'] + sorted(records): print(line)
 
 
 	def run(self):
@@ -556,10 +613,9 @@ class NBRPC:
 				' update [{td}]: {}', ' '.join(chk.host for chk in host_checks) )
 
 		## Check address availability
-		addr_checks = self.db.addr_checks(
+		addr_checks = set(self.db.addr_checks(
 			(ts - self.conf.td_addr_state) if not force_n else ts,
-			force_n or self.conf.limit_iter_addrs, force_host=force_host )
-		policy_changes = cs.defaultdict(list)
+			force_n or self.conf.limit_iter_addrs, force_host=force_host ))
 		if addr_checks:
 			self.log_td('addrs')
 			checks_str = ' '.join(chk.addr.compressed for chk in addr_checks)
@@ -569,41 +625,28 @@ class NBRPC:
 			n_fail = len(res) - (n_ok := sum((r is True) for r in res.values()))
 			self.log_td( 'addrs', 'Finished host-addrs check [ok={} fail={}'
 				' skip={} {td}]: {}', n_ok, n_fail, len(addr_checks) - len(res), checks_str )
-			for chk in addr_checks:
+			for chk in sorted(addr_checks, key=lambda chk: (chk.host, chk.addr.compressed)):
 				res_str = {True: 'ok', False: 'na', None: '???'}.get(s := res.get(chk.addr), s)
 				self.log.debug( 'Host-addr check: {} [{} {}] - {}',
 					chk.addr.compressed, chk.t.s, chk.host, res_str )
-			policy_host_key = op.attrgetter(*'host host_st p t.s'.split())
-			for chk in addr_checks:
 				st = self.db.addr_update( ts, chk.host,
 					chk.addr, chk.state, res.get(chk.addr) )
-				if st != chk.state:
-					if (hk := policy_host_key(chk)) not in policy_changes:
-						policy_changes[hk] = self._policy_t(*hk, dict())
-					policy_changes[hk].addr_sts[chk.addr] = st
+				if st == chk.state: addr_checks.remove(chk)
 
 		## Check if any host states should be flipped
 		if force_host: td_ok = td_na = 0
 		else: td_ok, td_na = self.conf.td_host_ok_state, self.conf.td_host_na_state
-		host_changes = self.db.host_state_sync(
-			ts, td_ok, td_na, (chk.host for chk in host_checks) )
-		if host_changes:
-			host_changes = dict(sorted((phu.host, phu) for phu in host_changes))
+		host_state_changes = self.db.host_state_sync(
+			ts, td_ok, td_na, set(chk.host for chk in host_checks) )
+		if host_state_changes:
 			st_map = {None: '???', True: 'OK', False: 'blocked'}
-			for phu in host_changes.values():
+			for phu in host_state_changes:
 				self.log.info( 'Host state updated ({}): {} = {} -> {}',
 					phu.t.s, phu.host, st_map[phu.state0], st_map[phu.state] )
-
-		if policy_changes:
-			for hk, pt in list(policy_changes.items()):
-				if pt.policy.pick: continue
-				elif pt.policy.af_pick: # flips same-AF addrs, so needs a full set
-					pt.addr_sts.update(self.db.host_addr_states(pt.host))
-				# Rest of them only change with host states
-				elif pt.host not in host_changes: del policy_changes[hk]
-			self.policy_update(policy_changes.values())
-
-		return bool(host_changes or policy_changes)
+		if host_policy_updates := policy_host_updates(
+				set(phu.host for phu in host_state_changes), addr_checks ):
+			self.policy_update(host_policy_updates)
+		return bool(host_policy_updates)
 
 
 	def run_failing(self):
@@ -767,39 +810,26 @@ class NBRPC:
 					' {}', hook, self.conf.timeout_policy_cmd, err_fmt(err), err=True )
 			else: self.log_td('pu', 'Policy-{} socket-send success [{td}]', hook)
 
-	_policy_t = cs.namedtuple('PolicyTuple', 'host state policy chk addr_sts')
-	def policy_dump(self, pts):
-		lines = list()
-		for pt in pts:
-			if pt.policy.af_any or pt.policy.af_all:
-				addr_sts = dict((a, pt.state) for a in pt.addr_sts)
-			elif pt.policy.noroute:
-				addr_sts = dict((a, True) for a in pt.addr_sts)
-			elif pt.policy.af_pick:
-				afs = set(a.version for a, ast in pt.addr_sts.items() if ast is False)
-				addr_sts = dict((a, a.version not in afs) for a in pt.addr_sts)
-			elif pt.policy.pick:
-				addr_sts = dict( (a, ast) for a, ast
-					in pt.addr_sts.items() if ast is not None )
-			lines.extend(
-				f'{ast and "ok" or "na"} {pt.host} {addr.compressed} {pt.chk}\n'
-				for addr, ast in addr_sts.items() )
-		return ''.join(lines).encode()
+	def policy_fetch(self, hosts=None, addrs=None):
+		pis = list()
+		for host, pls in it.groupby(
+				self.db.host_state_policy(hosts, addrs), key=op.attrgetter('host') ):
+			addr_sts = dict()
+			for pl in pls: addr_sts[pl.addr] = pl.addr_st
+			pis.append(policy_info(host, pl.state, pl.p, pl.t.s, addr_sts))
+		return pis
 
-	def policy_update(self, pts):
-		self.run_policy_cmd('update', lambda: self.policy_dump(pts))
+	def policy_update(self, host_updates):
+		self.run_policy_cmd( 'update',
+			lambda: policy_dump(self.policy_fetch(
+				set(h for h,addrs in host_updates.items() if not addrs),
+				set(it.chain.from_iterable(host_updates.values())) )) )
 
 	def policy_replace(self):
-		def policy_func():
-			pts = list()
-			for host, pls in it.groupby(
-					self.db.host_state_policy(), key=op.attrgetter('host') ):
-				addr_sts = dict()
-				for pl in pls: addr_sts[pl.addr] = pl.addr_st
-				pts.append(self._policy_t(host, pl.state, pl.p, pl.t.s, addr_sts))
-			return self.policy_dump(pts)
-		self.run_policy_cmd('replace', policy_func)
+		self.run_policy_cmd('replace', lambda: policy_dump(self.policy_fetch()))
 
+
+### CLI
 
 def conf_opt_info(conf):
 	intervals, timeouts, limits, p = list(), list(), list(), pl.Path(__file__)
@@ -921,7 +951,7 @@ def main(args=None, conf=None):
 			' Supported limits:\n' + ''.join(f' {line}\n' for line in info_limits))
 
 	group = parser.add_argument_group('External hook scripts')
-	group.add_argument('--policy-update-cmd', metavar='command', help=dd('''
+	group.add_argument('-X', '--policy-update-cmd', metavar='command', help=dd('''
 		Command to add/remove routing policy rules for specific IP address(-es).
 		Will be piped lines for specific policy changes to stdin, for example:
 			ok google.com 142.250.74.142 https
