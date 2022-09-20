@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft, subprocess as sp
 import pathlib as pl, contextlib as cl, collections as cs, ipaddress as ip, datetime as dt
-import os, sys, re, logging, time, socket, random, errno, signal, textwrap, zoneinfo
+import os, sys, re, logging, time, socket, random, signal, textwrap, zoneinfo
 
 
 class LogMessage:
@@ -725,8 +725,7 @@ class NBRPC:
 				curl.terminate()
 				try: curl.wait(self.conf.timeout_kill)
 				except sp.TimeoutExpired: curl.kill()
-			except OSError as err:
-				if err.errno != errno.ESRCH: raise
+			except ProcessLookupError: pass
 			finally: curl, proc = None, curl
 			proc.wait()
 
