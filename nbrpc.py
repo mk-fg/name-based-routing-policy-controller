@@ -48,9 +48,9 @@ class NBRPConfig:
 	db_file = pl.Path(_p.name.removesuffix('.py') + '.db')
 	db_debug, db_lock_timeout = False, 60
 	curl_cmd = 'curl'
-	curl_ua = 'User-Agent: Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
+	curl_ua = 'Mozilla/5.0 (Windows NT 10.0; rv:91.0) Gecko/20100101 Firefox/91.0'
 	policy_update_cmd = policy_replace_cmd = policy_socket = None
-	fake_results = None
+	fake_results = curl_cmd_debug = None
 
 	update_all = update_sync = False
 	update_n = update_host = None
@@ -710,10 +710,13 @@ class NBRPC:
 		curl_to, curl_fmt = self.conf.timeout_addr_check, (
 			'%{urlnum} %{response_code} %{time_total}'
 			' :: %{exitcode} %{ssl_verify_result} :: %{errormsg}\n' )
-		curl = None if not addr_checks_curl else sp.Popen(
-			[ self.conf.curl_cmd, '--disable', '--config', '-',
-				'--parallel', '--parallel-immediate', '--max-time', str(curl_to) ],
-			stdin=sp.PIPE, stdout=sp.PIPE )
+		curl_cmd = [ self.conf.curl_cmd, '--disable', '--config', '-',
+			'--parallel', '--parallel-immediate', '--max-time', str(curl_to) ]
+		if not addr_checks_curl: curl = None
+		elif self.conf.curl_cmd_debug:
+			p_err(f'--- curl cmd (stdin-config follows on stdout):\n  {" ".join(curl_cmd)}')
+			curl = sp.Popen(['cat'], stdin=sp.PIPE)
+		else: curl = sp.Popen(curl_cmd, stdin=sp.PIPE, stdout=sp.PIPE)
 
 		def curl_term(sig=None, frm=None):
 			nonlocal curl
@@ -753,6 +756,7 @@ class NBRPC:
 					*'silent disable globoff fail no-keepalive no-sessionid tcp-fastopen'.split(),
 					f'write-out = "{curl_fmt}"', 'output = /dev/null', '' ]).encode())
 			curl.stdin.flush(); curl.stdin.close()
+			if self.conf.curl_cmd_debug: exit(curl.wait())
 
 			addr_idx = list(addr_checks_curl)
 			for line_raw in curl.stdout:
@@ -979,6 +983,8 @@ def main(args=None, conf=None):
 	group.add_argument('--debug', action='store_true', help=dd('''
 		Enables verbose logging and some extra db sanity-checks,
 			which can normally fail on race conditions with concurrent db access.'''))
+	group.add_argument('--debug-curl-cmd', action='store_true',
+		help='Print command and configuration of first curl that script runs and exit.')
 
 	opts = parser.parse_args(sys.argv[1:] if args is None else args)
 
@@ -992,6 +998,7 @@ def main(args=None, conf=None):
 	if not ( conf.host_files or opts.print_state
 			or opts.failing_checks or opts.unbound_zone_for ):
 		parser.error('No check-list files specified')
+	conf.curl_cmd_debug = opts.debug_curl_cmd
 
 	conf.db_file, conf.policy_socket = pl.Path(opts.db), opts.policy_socket
 	conf.update_all, conf.update_sync = opts.update_all, opts.sync_on_start
