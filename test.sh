@@ -431,7 +431,7 @@ test_block_afs() {
 
 rm -f "$db"; echo >"$chks" test
 
-echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::1 test@1::2'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::1 test@1::2'
 rm -f "$db"; test_run 450
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
@@ -441,7 +441,7 @@ ok test 1::2 https
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
-echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::1=0 test@1::2'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::1=0 test@1::2'
 rm -f "$db"; test_run 451
 cat >"$tmpdir"/out.expected.txt <<EOF
 na test 0.0.0.1 https
@@ -451,15 +451,39 @@ na test 1::2 https
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
-echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::1 test@1::2=0'
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2 test@1::1 test@1::2'
 rm -f "$db"; test_run 452
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 0.0.0.2 https
+na test 1::1 https
+na test 1::2 https
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+# cli default option checks
+
+rm -f "$db"; echo >"$chks" 'test'
+echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
+test_run_opts+=( -p af-any ); test_run 453
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https
-ok test 1::1 https
-ok test 1::2 https
+ok test 1::3 https
+ok test 1::4 https
 EOF
-diff -uB "$tmpdir"/out{.expected,}.txt
+diff -u "$tmpdir"/out{.expected,}.txt
+
+rm -f "$db"; echo >"$chks" 'test>af-any'
+echo >"$run" 'test@0.0.0.1=0 test@0.0.0.2 test@1::3 test@1::4'
+test_run_opts+=( -p af-all ); test_run 649
+cat >"$tmpdir"/out.expected.txt <<EOF
+ok test 0.0.0.1 https
+ok test 0.0.0.2 https
+ok test 1::3 https
+ok test 1::4 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
 
 }
 
@@ -619,11 +643,11 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 
 test_block_reroute_policy() {
 
-test_block_reroute_policy_afany() {
-local ts_base=$1
+# policy = af-any
+rm -f "$db"; echo >"$chks" 'test>af-any'
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4'
-test_run $(($ts_base + 0))
+test_run 550
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https
@@ -633,7 +657,7 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4'
-test_run $(($ts_base + 1))
+test_run 551
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https
@@ -643,7 +667,7 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4'
-test_run $(($ts_base + 10))
+test_run 560
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https
@@ -653,7 +677,7 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
-test_run $(($ts_base + 11))
+test_run 561
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https
@@ -663,7 +687,7 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3=0 test@1::4'
-test_run $(($ts_base + 20))
+test_run 570
 cat >"$tmpdir"/out.expected.txt <<EOF
 na test 0.0.0.1 https
 na test 0.0.0.2 https
@@ -673,7 +697,7 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
-test_run $(($ts_base + 21))
+test_run 571
 cat >"$tmpdir"/out.expected.txt <<EOF
 na test 0.0.0.1 https
 na test 0.0.0.2 https
@@ -683,7 +707,7 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
-test_run $(($ts_base + 30))
+test_run 580
 cat >"$tmpdir"/out.expected.txt <<EOF
 na test 0.0.0.1 https
 na test 0.0.0.2 https
@@ -693,38 +717,7 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
-test_run $(($ts_base + 40))
-cat >"$tmpdir"/out.expected.txt <<EOF
-ok test 0.0.0.1 https
-ok test 0.0.0.2 https
-ok test 1::3 https
-ok test 1::4 https
-EOF
-diff -u "$tmpdir"/out{.expected,}.txt
-
-}
-
-# policy = af-any default
-
-rm -f "$db"; echo >"$chks" 'test'
-test_block_reroute_policy_afany 550
-rm -f "$db"; echo >"$chks" 'test>af-any'
-test_block_reroute_policy_afany 600
-
-rm -f "$db"; echo >"$chks" 'test'
-echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
-test_run_opts+=( -p af-all ); test_run 648
-cat >"$tmpdir"/out.expected.txt <<EOF
-na test 0.0.0.1 https
-na test 0.0.0.2 https
-na test 1::3 https
-na test 1::4 https
-EOF
-diff -u "$tmpdir"/out{.expected,}.txt
-
-rm -f "$db"; echo >"$chks" 'test>af-any'
-echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
-test_run_opts+=( -p af-all ); test_run 649
+test_run 590
 cat >"$tmpdir"/out.expected.txt <<EOF
 ok test 0.0.0.1 https
 ok test 0.0.0.2 https
@@ -734,8 +727,8 @@ EOF
 diff -u "$tmpdir"/out{.expected,}.txt
 
 # policy = af-all
-
 rm -f "$db"; echo >"$chks" 'test>af-all'
+
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
 test_run 650
 cat >"$tmpdir"/out.expected.txt <<EOF
@@ -754,8 +747,8 @@ test_run 671; test_run 680
 diff -u "$tmpdir"/out{.expected,}.txt
 
 # policy = af-pick
-
 rm -f "$db"; echo >"$chks" 'test>af-pick'
+
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4'
 test_run 700
 cat >"$tmpdir"/out.expected.txt <<EOF
@@ -833,8 +826,8 @@ EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
 # policy = pick
-
 rm -f "$db"; echo >"$chks" 'test>pick'
+
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2 test@1::3 test@1::4=0'
 test_run 800
 cat >"$tmpdir"/out.expected.txt <<EOF
@@ -894,8 +887,8 @@ EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
 
 # policy = noroute
-
 rm -f "$db"; echo >"$chks" 'test>noroute'
+
 echo >"$run" 'test@0.0.0.1 test@0.0.0.2=0 test@1::3 test@1::4=0'
 test_run_opts+=( -p af-all ); test_run 830
 cat >"$tmpdir"/out.expected.txt <<EOF

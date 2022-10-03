@@ -891,7 +891,7 @@ def main(args=None, conf=None):
 	parser.add_argument('-d', '--db', metavar='path', default=conf.db_file.name,
 		help='Path to sqlite database used to track host states. Default: %(default)s')
 	parser.add_argument('-p', '--check-list-default-policy',
-		metavar='spec', default='af-any', help=dd('''
+		metavar='spec', default='af-all', help=dd('''
 			Default value for per-host "policy", if not specified in -f/check-list-file for the host.
 			Same meaning for these as in ">policy" component for specs in that file.
 			See README file for info on all possible values for it. Default: %(default)s.'''))

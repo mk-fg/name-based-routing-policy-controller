@@ -318,7 +318,7 @@ Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-
   ``af-all``, ``af-pick.NL`` - but using some DNS flags like ``46`` together
   makes them negate each other.
 
-  Default value is ``af-any``.
+  Default value is ``af-all``.
   Can be changed via ``-p/--check-list-default-policy`` script option.
 
 Empty lines are fine, anything after # to the end of the line is ignored as comment.
