@@ -60,6 +60,7 @@ class NBRPConfig:
 	td_addr_state = 15 * 3600 # service availability checks for specific addrs
 	td_host_ok_state = 41 * 3600 # how long to wait resetting failures back to ok
 	td_host_na_state = 10 * 3600 # grace period to wait for host to maybe come back up
+	td_db_reopen = 5 * 3600 # reopen sqlite db occasionally to flush any WAL logs
 
 	timeout_host_addr = 12 * 24 * 3600 # to "forget" addrs that weren't seen in a while
 	timeout_addr_check = 30.0 # for http and socket checks
@@ -474,6 +475,12 @@ class NBRPC:
 		return self
 	def __exit__(self, *err): self.close()
 
+	def db_reopen_check(self, tsm=None):
+		if not tsm: tsm = time.monotonic()
+		self.db_ts = getattr(self, 'db_ts', 0) or tsm
+		if tsm - self.db_ts < self.conf.td_db_reopen: return
+		self.db.close(); self.db_ts = tsm
+
 	def log_td(self, tid, log_fmt=None, *log_args, warn=False, err=False):
 		if not log_fmt:
 			self.timers[tid] = time.monotonic()
@@ -575,6 +582,7 @@ class NBRPC:
 			if c.update_host or c.update_n: break
 
 			tsm = time.monotonic()
+			self.db_reopen_check(tsm)
 			while tsm_checks <= tsm: tsm_checks += c.td_checks
 			delay = tsm_checks - tsm
 			self.log.debug('Delay until next checks: {:,.1f}', delay)
@@ -658,6 +666,7 @@ class NBRPC:
 				force_n=force_n, force_host=c.update_host )
 			if c.update_host or c.update_n: break
 			tsm = time.monotonic()
+			self.db_reopen_check(tsm)
 			while tsm_checks <= tsm: tsm_checks += c.td_checks
 			delay = tsm_checks - tsm
 			self.log.debug('Delay until next failing-rechecks: {:,.1f}', delay)
