@@ -17,6 +17,12 @@ but it does seem to be a global trend too.
 .. contents::
   :backlinks: none
 
+Repository URLs:
+
+- https://github.com/mk-fg/name-based-routing-policy-controller
+- https://codeberg.org/mk-fg/name-based-routing-policy-controller
+- https://fraggod.net/code/git/name-based-routing-policy-controller
+
 
 More Description
 ----------------
@@ -285,8 +291,12 @@ Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-
   ``https/url/path...``, to query that for more useful response status code.
   If there's ``=`` in URL path, replace/escape it with ``==``.
 
+  "dns" check is a no-op to track IPs for zone-files output or other purposes.
+
 - ``expected-result`` - for http(s) checks - response code(s) to treat as an OK result,
   with anything else considered a failure, separated by slash ("/"). Default is 200/301/302.
+
+  Special ``na`` value will always return failure for any check without running it.
 
 - ``policy`` - how to combine conflicting check results for different host addresses.
 

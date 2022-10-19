@@ -911,9 +911,9 @@ diff -uB "$tmpdir"/out{.expected,}.txt
 }
 
 
-## No-op type=dns checks
+## No-op type:dns and res=na checks
 
-test_block_type_dns() {
+test_block_dns_noop() {
 
 rm -f "$db"; echo >"$chks" 'test:dns'
 echo >"$run" 'test@0.0.0.1=0 test@1::2 test@1::3=0'
@@ -940,6 +940,33 @@ local-data: 'test AAAA 1::2'
 local-data: 'test AAAA 1::3'
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
+
+echo >"$chks" 'test:dns=na'
+echo >"$run" 'test@0.0.0.1 test@1::2'
+test_run 852
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 dns
+na test 1::2 dns
+na test 1::3 dns
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
+test_run_opts+=( -Z. ); test_run 853
+cat >"$tmpdir"/out.expected.txt <<EOF
+local-zone: test. static
+local-data: 'test A 0.0.0.1'
+local-data: 'test AAAA 1::2'
+local-data: 'test AAAA 1::3'
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
+
+rm -f "$db"; echo >"$chks" 'test=na'
+echo >"$run" 'test@0.0.0.1 test@1::2'
+test_run 854
+cat >"$tmpdir"/out.expected.txt <<EOF
+na test 0.0.0.1 https
+na test 1::2 https
+EOF
+diff -u "$tmpdir"/out{.expected,}.txt
 
 }
 
@@ -1198,7 +1225,7 @@ test_block_afs
 test_block_zone
 test_block_zone_policy
 test_block_reroute_policy
-test_block_type_dns
+test_block_dns_noop
 test_block_updates
 test_block_gai_last
 

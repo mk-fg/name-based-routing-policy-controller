@@ -701,7 +701,8 @@ class NBRPC:
 	def run_addr_checks(self, addr_checks):
 		addr_checks_curl, addr_checks_res = dict(), dict()
 		for chk in addr_checks:
-			if chk.t.s == 'dns': addr_checks_res[chk.addr] = True
+			if chk.t.res == 'na': addr_checks_res[chk.addr] = False
+			elif chk.t.s == 'dns': addr_checks_res[chk.addr] = True
 			elif chk.t.s in ['http', 'https']: addr_checks_curl[chk.addr] = chk
 			else: self.log.warning('Skipping not-implemented check type: {}', chk.t.s)
 		if not addr_checks_curl: return addr_checks_res
