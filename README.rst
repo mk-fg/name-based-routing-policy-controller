@@ -57,6 +57,13 @@ If you don't want to run traffic over tunnels, and/or trying to bypass specific
 national firewalls, lookup tools like GreenTunnel_, GoodbyeDPI_, PowerTunnel_ or
 zapret_ instead.
 
+This script also will not work for hiding or obfuscating the fact of
+accessing something (which is a very complex and different subject),
+I'd recommend using `Tor Project`_ and similar privacy toolkits instead,
+with all traffic wrapped indiscriminately (access info leaks in many
+ways - traffic patterns, third-party page content, OCSP packets, etc)
+and a dedicated privacy-focused clients/OS as well (like Tails_ and `Tor Browser`_).
+
 .. _nftables sets: https://wiki.nftables.org/wiki-nftables/index.php/Sets
 .. _ip-route tables: https://man.archlinux.org/man/ip-route.8.en
 .. _ip-rules: https://man.archlinux.org/man/ip-rule.8.en
@@ -65,6 +72,9 @@ zapret_ instead.
 .. _GoodbyeDPI: https://github.com/ValdikSS/GoodbyeDPI
 .. _PowerTunnel: https://github.com/krlvm/PowerTunnel
 .. _zapret: https://github.com/bol-van/zapret
+.. _Tor Project: https://www.torproject.org/
+.. _Tails: https://tails.boum.org/
+.. _Tor Browser: https://www.torproject.org/download/
 
 
 Routing policy decision-making logic
