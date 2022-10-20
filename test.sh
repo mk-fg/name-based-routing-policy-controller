@@ -958,6 +958,14 @@ local-data: 'test AAAA 1::2'
 local-data: 'test AAAA 1::3'
 EOF
 diff -uB "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [dns blocked @ 2001-09-09.16:12]:
+ *0.0.0.1 :: [2001-09-09.16:12] na
+ *1::2 :: [2001-09-09.16:12] na
+  1::3 :: [2001-09-09.16:12] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
 
 rm -f "$db"; echo >"$chks" 'test=na'
 echo >"$run" 'test@0.0.0.1 test@1::2'
@@ -967,6 +975,13 @@ na test 0.0.0.1 https
 na test 1::2 https
 EOF
 diff -u "$tmpdir"/out{.expected,}.txt
+test_policy
+cat >"$tmpdir"/out.expected.txt <<EOF
+test [https blocked @ 2001-09-09.16:14]:
+ *0.0.0.1 :: [2001-09-09.16:14] na
+ *1::2 :: [2001-09-09.16:14] na
+EOF
+diff -uB "$tmpdir"/out{.expected,}.txt
 
 }
 
