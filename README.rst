@@ -358,6 +358,10 @@ Simple Example::
   www.wikipedia.org>pick.RL
   abcdefg.cloudfront.net>LD:https/api=400
 
+  ## Always route-around Lets-Encrypt OCSP requests for more privacy/reliability
+  # https://letsencrypt.org/docs/lencr.org/
+  ocsp.int-x3.letsencrypt.org=na r3.o.lencr.org=na
+
 These config files can be missing, created, removed or changed on the fly,
 with their mtimes probed on every check interval, and contents reloaded as needed.
 
