@@ -54,8 +54,8 @@ packets or otherwise work around specific censorshit types and implementations,
 just route stuff around whatever, whereever or by-whomever it is.
 
 If you don't want to run traffic over tunnels, and/or trying to bypass specific
-national firewalls, lookup tools like GreenTunnel_, GoodbyeDPI_, PowerTunnel_ or
-zapret_ instead.
+national firewalls, lookup tools like `XTLS Xray/REALITY`_, GreenTunnel_,
+GoodbyeDPI_, PowerTunnel_, NaïveProxy_, zapret_, xt_wgobfs_ instead.
 
 This script also will not work for hiding or obfuscating the fact of
 accessing something (which is a very complex and different subject),
@@ -68,10 +68,13 @@ and a dedicated privacy-focused clients/OS as well (like Tails_ and `Tor Browser
 .. _ip-route tables: https://man.archlinux.org/man/ip-route.8.en
 .. _ip-rules: https://man.archlinux.org/man/ip-rule.8.en
 .. _DNS Privacy project: https://dnsprivacy.org/
+.. _XTLS Xray/Reality: https://github.com/XTLS
 .. _GreenTunnel: https://github.com/SadeghHayeri/GreenTunnel
 .. _GoodbyeDPI: https://github.com/ValdikSS/GoodbyeDPI
 .. _PowerTunnel: https://github.com/krlvm/PowerTunnel
+.. _NaïveProxy: https://github.com/klzgrad/naiveproxy
 .. _zapret: https://github.com/bol-van/zapret
+.. _xt_wgobfs: https://github.com/infinet/xt_wgobfs
 .. _Tor Project: https://www.torproject.org/
 .. _Tails: https://tails.boum.org/
 .. _Tor Browser: https://www.torproject.org/download/
