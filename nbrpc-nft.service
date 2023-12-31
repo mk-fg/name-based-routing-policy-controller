@@ -18,7 +18,7 @@ ProtectProc=noaccess
 ProtectHome=yes
 PrivateDevices=yes
 NoNewPrivileges=yes
-SecureBits=keep-caps-locked noroot-locked
+SecureBits=noroot-locked
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 
