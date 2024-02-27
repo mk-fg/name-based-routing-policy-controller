@@ -930,7 +930,7 @@ def main(args=None, conf=None):
 		Limit/interval/timeout opts that apply to main loop and checks are used here as well,
 			e.g. "checks" interval between db checks, "addr-state" between per-addr checks, etc.
 		Does not need/use -f/--check-list-file option.'''))
-	group.add_argument('-Z', '--unbound-zone-for', metavar='regexp', help=dd('''
+	group.add_argument('-Z', '--unbound-zone-for', metavar='regexp', action='append', help=dd('''
 		Generate local YAML zone-file for regexp-specified hosts to stdout and exit.
 		It's intended to be included in Unbound DNS resolver config via "include:" directive.
 		Static local-zone and local-data directives there are to lock specified
@@ -943,7 +943,9 @@ def main(args=None, conf=None):
 			%% - return records in shuffled order; > - only directly-accessible addrs;
 			+ - A (IPv4) only; * - AAAA (IPv6) only.
 		Using these flags disregards any per-host DNS filtering policies, if specified.
-		Make sure this script doesn't use such restricted resolver itself.'''))
+		Make sure this script doesn't use such restricted resolver itself.
+		Can be used multiple times, which would work same
+			as running the script separately with each pattern.'''))
 	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
 		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
 
@@ -1042,7 +1044,9 @@ def main(args=None, conf=None):
 			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
 	with NBRPC(conf) as nbrpc:
 		if opts.print_state: return nbrpc.print_checks()
-		if opts.unbound_zone_for: return nbrpc.print_unbound_zone(opts.unbound_zone_for)
+		if opts.unbound_zone_for:
+			for pat in opts.unbound_zone_for: nbrpc.print_unbound_zone(pat)
+			return
 		signal.signal(signal.SIGQUIT, lambda sig,frm: None)
 		signal.signal(signal.SIGHUP, lambda sig,frm: setattr(conf, 'update_sync', True))
 		if not opts.failing_checks:
