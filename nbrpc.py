@@ -719,7 +719,7 @@ class NBRPC:
 		curl_ports = dict(http=80, https=443)
 		curl_to, curl_fmt = self.conf.timeout_addr_check, (
 			'%{urlnum} %{response_code} %{time_total}'
-			' :: %{exitcode} %{ssl_verify_result} :: %{errormsg}\n' )
+			' :: %{exitcode} %{ssl_verify_result} :: %{errormsg}\\n' )
 		curl_cmd = [ self.conf.curl_cmd, '--disable', '--config', '-',
 			'--parallel', '--parallel-immediate', '--max-time', str(curl_to) ]
 		if not addr_checks_curl: curl = None
