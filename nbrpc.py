@@ -2,7 +2,7 @@
 
 import itertools as it, operator as op, functools as ft, subprocess as sp
 import pathlib as pl, contextlib as cl, collections as cs, ipaddress as ip, datetime as dt
-import os, sys, re, logging, time, socket, random, signal, textwrap, zoneinfo
+import os, sys, re, logging, time, socket, random, signal, textwrap, zoneinfo, enum
 
 
 class LogMessage:
@@ -74,6 +74,8 @@ class NBRPConfig:
 
 
 ### Parsers and structs for translating check-list strings
+
+zone_fmt = enum.Enum('ZoneFormat', ['unbound', 'hosts'])
 
 host_file = cs.namedtuple('HostsFile', 'p mtime hosts')
 host_info = cs.namedtuple('HostInfo', 'host chk policy') # strings for db
@@ -546,11 +548,11 @@ class NBRPC:
 				print(line)
 		print()
 
-	def print_unbound_zone(self, spec):
+	def print_zone(self, fmt, spec):
 		policy = re.search('^([+*>@%]*)', spec)
 		policy, spec = policy.group(), spec[policy.end():]
 		if policy: policy = chk_policy(policy.translate(str.maketrans('+*>@%', '46DLR')))
-		re_host = re.compile(spec)
+		out, re_host = list(), re.compile(spec)
 		for host, addrs in it.groupby(
 				self.db.host_state_policy(), key=op.attrgetter('host') ):
 			if not re_host.search(host): continue
@@ -562,10 +564,15 @@ class NBRPC:
 				if ap.dns_af:
 					if (rt == 'A') is not ('6' not in ap.dns_af.name): continue
 				if ap.dns_last and not st.addr_last: continue
-				records.append(f"local-data: '{st.host} {rt} {st.addr.compressed}'")
+				if fmt is fmt.hosts: records.append(f'{st.addr.compressed} {st.host}')
+				elif fmt is fmt.unbound:
+					records.append(f"local-data: '{st.host} {rt} {st.addr.compressed}'")
 			if ap:
 				if ap.dns_shuf: random.shuffle(records)
-				for line in [f'\nlocal-zone: {st.host}. static'] + sorted(records): print(line)
+				out.append('')
+				if fmt is fmt.unbound: out.append(f'local-zone: {st.host}. static')
+				out.extend(records)
+		if out: print('\n'.join(out).strip())
 
 
 	def run(self):
@@ -930,24 +937,29 @@ def main(args=None, conf=None):
 		Limit/interval/timeout opts that apply to main loop and checks are used here as well,
 			e.g. "checks" interval between db checks, "addr-state" between per-addr checks, etc.
 		Does not need/use -f/--check-list-file option.'''))
-	group.add_argument('-Z', '--unbound-zone-for', metavar='regexp', action='append', help=dd('''
-		Generate local YAML zone-file for regexp-specified hosts to stdout and exit.
-		It's intended to be included in Unbound DNS resolver config via "include:" directive.
-		Static local-zone and local-data directives there are to lock specified
-			host(s) to only use IPs from database that's been checked by this script,
-			to avoid application errors due to them resolving same name(s) to some diff ones.
-		Specified regexp (python re format) should match host(s)
-			in the database, empty output will be produced on no match.
+	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
+		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
+	group.add_argument('-Z', '--zone-for', metavar='regexp', action='append', help=dd('''
+		Generate local hosts/zone file for regexp-specified hosts to stdout and exit.
+		It's intended to be loaded/included by a dns resolver, e.g. unbound or coredns.
+		See -z/--zone-format option for choosing format for exported data.
+		Regexp specified with this option (python re format) should match
+			host(s) in the database, empty output will be produced on no match(es).
 		Returned addresses can be also filtered by using following prefix(-es) before regexp:
 			@ - limit to only addrs seen in last in getaddrinfo() result for hostname;
 			%% - return records in shuffled order; > - only directly-accessible addrs;
 			+ - A (IPv4) only; * - AAAA (IPv6) only.
-		Using these flags disregards any per-host DNS filtering policies, if specified.
-		Make sure this script doesn't use such restricted resolver itself.
+		Using these prefix-flags disregards any per-host DNS filtering policies, if specified.
 		Can be used multiple times, which would work same
-			as running the script separately with each pattern.'''))
-	group.add_argument('-n', '--force-n-checks', type=int, metavar='n',
-		help='Run n forced checks for hosts and their addrs and exit, to test stuff.')
+			as running the script separately with each pattern.
+		Make sure this script itself does not use dns resolver which loads produced files.'''))
+	group.add_argument('-z', '--zone-format', choices=['unbound', 'hosts'],
+		metavar='unbound/hosts', default='unbound', help=dd('''
+			File format for generated "local zone file" (list of IPs for hosts) for DNS resolvers.
+			Currently supported formats: unbound, hosts. Default: %(default)s
+			"unbound" format is YAML zone-file to load from
+				Unbound DNS resolver configuration file via "include:" directive.
+			"host" format is same as /etc/hosts file, can be used by CoreDNS "hosts" plugin.'''))
 
 	group = parser.add_argument_group('Check/update scheduling options')
 	group.add_argument('-i', '--interval',
@@ -1008,7 +1020,7 @@ def main(args=None, conf=None):
 
 	conf.host_files = list(pl.Path(p) for p in opts.check_list_file)
 	if not ( conf.host_files or opts.print_state
-			or opts.failing_checks or opts.unbound_zone_for ):
+			or opts.failing_checks or opts.zone_for ):
 		parser.error('No check-list files specified')
 	conf.curl_cmd_debug = opts.debug_curl_cmd
 
@@ -1044,8 +1056,8 @@ def main(args=None, conf=None):
 			log.debug('Exiting on {} signal', signal.Signals(sig).name) or sys.exit(os.EX_OK) )
 	with NBRPC(conf) as nbrpc:
 		if opts.print_state: return nbrpc.print_checks()
-		if opts.unbound_zone_for:
-			for pat in opts.unbound_zone_for: nbrpc.print_unbound_zone(pat)
+		if opts.zone_for:
+			for pat in opts.zone_for: nbrpc.print_zone(zone_fmt[opts.zone_format], pat)
 			return
 		signal.signal(signal.SIGQUIT, lambda sig,frm: None)
 		signal.signal(signal.SIGHUP, lambda sig,frm: setattr(conf, 'update_sync', True))

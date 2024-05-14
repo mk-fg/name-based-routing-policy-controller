@@ -144,10 +144,10 @@ done by the script are listed below.
     can be less convenient/slow/costly than just dropping these unlucky addrs.
 
   When some form of DNS override/filtering is in place, script can be used
-  with ``-Z/--unbound-zone-for`` option to export records for that at any time,
+  with ``-Z/--zone-for`` option to export records for that at any time,
   selecting strategies from the list above on per-host or per-run basis.
 
-  Option dumps local-zone info to stdout (in Unbound_ resolver format),
+  Option dumps local-zone info to stdout (in Unbound_ resolver format by default),
   filtered by regexp for hostname(s) and any policy modifiers.
   Using larger superset of "all seen" addresses can be useful to schedule
   these updates less often, and not bother tracking upstream results exactly.
@@ -335,7 +335,7 @@ Each spec can be more than just hostname: ``hostname[>policy][:check][=expected-
   - ``1`` - only take addrs from last getaddrinfo() into account for updating host state.
   - ``R`` - always print records in a random (shuffled) order.
 
-  Where "print" flags are only relevant when using ``-Z/--unbound-zone-for`` option.
+  Where "print" flags are only relevant when using ``-Z/--zone-for`` option.
 
   Any combination of these should work - for example ``pick.6``, ``LD4``,
   ``af-all``, ``af-pick.NL`` - but using some DNS flags like ``46`` together
@@ -603,12 +603,14 @@ Related links, tips, info and trivia
 
 - If some service is hopping between IPs too much, so that nbrpc can't catch-up
   with it, and occasionally-failing connections are annoying, script has
-  ``-Z/--unbound-zone-for`` option to export local-zone with only A/AAAA records
+  ``-Z/--zone-for`` option to export local-zone with only A/AAAA records
   known to it (or some subset - see option description) for regexp-filtered list
   of known/managed hostnames (can be just ``-Z.`` to dump all of them).
 
-  Output produced there can be used with `Unbound`_'s (DNS resolver/cache
-  daemon) ``include:`` directive, or parsed/converted for other local resolvers.
+  Output produced there by default can be used with `Unbound`_'s (DNS
+  resolver/cache daemon) ``include:`` directive, or with CoreDNS_ "hosts"
+  directive (picking \/etc\/hosts file format with ``-z hosts`` option),
+  or parsed/converted for other local resolvers from those.
   Should probably be scheduled via systemd timer
   (with e.g. ``StandardOutput=truncate:...`` line) or crontab.
 
@@ -617,6 +619,7 @@ Related links, tips, info and trivia
   resolv.conf file (pointing to unrestricted resolver) into its systemd service/container.
 
   .. _Unbound: https://unbound.docs.nlnetlabs.nl/
+  .. _CoreDNS: https://coredns.io/
 
 - While intended to work around various network disruptions, this stuff can also
   be used in the exact opposite way - to detect when specific endpoints are
