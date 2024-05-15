@@ -15,9 +15,11 @@ RestrictNetworkInterfaces=wan
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_ALG
 
 DynamicUser=yes
-ProtectProc=noaccess
+ProcSubset=pid
+ProtectProc=invisible
 ProtectHome=yes
 PrivateDevices=yes
+PrivateUsers=yes
 NoNewPrivileges=yes
 SecureBits=noroot-locked
 SystemCallFilter=@system-service
