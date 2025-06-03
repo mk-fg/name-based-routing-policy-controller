@@ -770,7 +770,7 @@ class NBRPC:
 					f'resolve = {host}:{port}:{addr}', # --connect-to can also be used
 					f'user-agent = "{self.conf.curl_ua}"',
 					f'connect-timeout = {curl_to}', f'max-time = {curl_to}',
-					*'silent disable globoff fail no-keepalive no-sessionid tcp-fastopen'.split(),
+					*'silent disable globoff fail no-keepalive no-sessionid'.split(),
 					f'write-out = "{curl_fmt}"', 'output = /dev/null', '' ]).encode())
 			curl.stdin.flush(); curl.stdin.close()
 			if self.conf.curl_cmd_debug: exit(curl.wait())
