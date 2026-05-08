@@ -11,7 +11,7 @@ the issues deliberately and selectively created on either side, aka censorshit.
 Especially useful these days, when local state, everyone around,
 and the rest of the world hate you, working together to cut you off
 from the interwebs, if you happen to live in a wrong place at a wrong time,
-but it does seem to be a global trend too.
+which seem to be a global trend.
 
 Table of Contents
 
@@ -62,33 +62,35 @@ alongside this tool - see [DNS Privacy project] for more info on that.
 
 Scripts here are not intended to do any tricks to fool DPI, discard RST
 packets or otherwise work around specific censorshit types and implementations,
-just route stuff around whatever, whereever or by-whomever it is.
+just check and configure workaround-routes via existing tunnels/interfaces.
 
-If you don't want to run traffic over tunnels, and/or trying to bypass specific
-national firewalls, lookup tools like [XTLS Xray/REALITY], [GreenTunnel],
-[GoodbyeDPI], [PowerTunnel], [NaïveProxy], [zapret], [xt_wgobfs] instead.
+For establishing tunnels or obfuscating traffic in other ways (bypassing
+specific national firewall quirks), lookup tools like [XTLS Xray/REALITY],
+[trojan], [hysteria], [olcrtc], [gecit], [GoodbyeDPI], [NaïveProxy],
+[zapret2] instead - whichever work under your censorship regime, or resources
+like [ntc.party] and [net4people/bbs] for more info on what might still work.
 
 This script also will not work for hiding or obfuscating the fact of
 accessing something (which is a very complex and different subject),
-I'd recommend using [Tor Project] and similar privacy toolkits instead,
-with all traffic wrapped indiscriminately (access info leaks in many
-ways - traffic patterns, third-party page content, OCSP packets, etc)
-and a dedicated privacy-focused clients/OS as well (like [Tails] and [Tor Browser]).
+I'd recommend looking at stuff like [Tor Project] and similar privacy
+toolkits/orgs, wrapping all traffic indiscriminately (not selectively)
+from an anonymized and security/privacy-hardened OS/VM/endpoint.
 
 [nftables sets]: https://wiki.nftables.org/wiki-nftables/index.php/Sets
 [ip-route tables]: https://man.archlinux.org/man/ip-route.8.en
 [ip-rules]: https://man.archlinux.org/man/ip-rule.8.en
 [DNS Privacy project]: https://dnsprivacy.org/
 [XTLS Xray/REALITY]: https://github.com/XTLS
-[GreenTunnel]: https://github.com/SadeghHayeri/GreenTunnel
+[trojan]: https://github.com/trojan-gfw
+[hysteria]: https://github.com/apernet/hysteria
+[olcrtc]: https://github.com/openlibrecommunity/olcrtc
+[gecit]: https://github.com/boratanrikulu/gecit
 [GoodbyeDPI]: https://github.com/ValdikSS/GoodbyeDPI
-[PowerTunnel]: https://github.com/krlvm/PowerTunnel
 [NaïveProxy]: https://github.com/klzgrad/naiveproxy
-[zapret]: https://github.com/bol-van/zapret
-[xt_wgobfs]: https://github.com/infinet/xt_wgobfs
+[zapret2]: https://github.com/bol-van/zapret2
+[ntc.party]: https://ntc.party/
+[net4people/bbs]: https://github.com/net4people/bbs/issues
 [Tor Project]: https://www.torproject.org/
-[Tails]: https://tails.boum.org/
-[Tor Browser]: https://www.torproject.org/download/
 
 
 <a name=hdr-routing_policy_decision-making_logic></a>
